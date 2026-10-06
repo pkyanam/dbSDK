@@ -1,0 +1,30 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Builds and framework output
+dist/
+build/
+.next/
+.blume/
+.wrangler/
+.vercel/
+.astro/
+
+# Env and secrets — never commit
+.env
+.env.*
+!.env.example
+
+# OS / editor noise
+.DS_Store
+*.log
+Thumbs.db
+
+# Internal working notes and research (not for the public repo by default)
+coordination/
+research/
+
+# Account/tooling dumps — never commit
+*.dump
+*.credentials
