@@ -1,0 +1,20 @@
+{
+  "name": "dbsdk-monorepo",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.22.0",
+  "engines": {
+    "node": ">=22.12"
+  },
+  "scripts": {
+    "build": "pnpm --filter dbsdk run build",
+    "test": "pnpm --filter dbsdk run test",
+    "typecheck": "pnpm --filter dbsdk run typecheck",
+    "pack:check": "pnpm --filter dbsdk run pack:check",
+    "changeset": "changeset",
+    "version-packages": "changeset version"
+  },
+  "devDependencies": {
+    "@changesets/cli": "^2.29.0"
+  }
+}

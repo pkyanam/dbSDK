@@ -1,0 +1,16 @@
+packages:
+  - "packages/*"
+  - "apps/*"
+allowBuilds:
+  esbuild: true
+  workerd: true
+minimumReleaseAgeExclude:
+  - '@iconify-json/lucide@1.2.140'
+  - '@scalar/helpers@0.16.1'
+  - '@scalar/json-magic@0.15.5'
+  - '@scalar/json-schema-validator@0.1.10'
+  - '@scalar/openapi-parser@0.29.11'
+  - '@scalar/openapi-upgrader@0.4.2'
+  - '@scalar/openapi-validator@0.1.10'
+  - '@scalar/types@0.23.0'
+  - blume@2.1.3

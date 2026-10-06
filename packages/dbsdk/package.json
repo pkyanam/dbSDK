@@ -1,0 +1,81 @@
+{
+  "name": "dbsdk",
+  "version": "0.1.0",
+  "description": "One typed PostgreSQL client for Supabase and Neon: parameterized SQL, honest capabilities, normalized errors, no silent failover.",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.12"
+  },
+  "keywords": [
+    "database",
+    "postgresql",
+    "postgres",
+    "supabase",
+    "neon",
+    "sql",
+    "sdk",
+    "typescript"
+  ],
+  "sideEffects": false,
+  "files": [
+    "dist"
+  ],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./testing": {
+      "types": "./dist/testing.d.ts",
+      "import": "./dist/testing.js",
+      "default": "./dist/testing.js"
+    },
+    "./postgres": {
+      "types": "./dist/adapters/postgres.d.ts",
+      "import": "./dist/adapters/postgres.js",
+      "default": "./dist/adapters/postgres.js"
+    },
+    "./supabase": {
+      "types": "./dist/adapters/supabase.d.ts",
+      "import": "./dist/adapters/supabase.js",
+      "default": "./dist/adapters/supabase.js"
+    },
+    "./neon": {
+      "types": "./dist/adapters/neon.d.ts",
+      "import": "./dist/adapters/neon.js",
+      "default": "./dist/adapters/neon.js"
+    }
+  },
+  "scripts": {
+    "build": "tsdown",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "pack:check": "npm pack --dry-run"
+  },
+  "peerDependencies": {
+    "pg": "^8.16.0",
+    "@neondatabase/serverless": "^1.2.0"
+  },
+  "peerDependenciesMeta": {
+    "pg": {
+      "optional": true
+    },
+    "@neondatabase/serverless": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@neondatabase/serverless": "^1.2.0",
+    "@types/node": "^26.6.4",
+    "@types/pg": "^8.23.1",
+    "pg": "^8.23.1",
+    "tsdown": "^0.23.0",
+    "typescript": "^5.9.0",
+    "vitest": "^5.0.3"
+  }
+}

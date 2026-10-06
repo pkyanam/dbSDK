@@ -1,0 +1,29 @@
+{
+  "name": "@dbsdk/examples",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.12"
+  },
+  "description": "Runnable dbSDK examples. Install after building the workspace package (npm is not published).",
+  "scripts": {
+    "fixture": "tsx 04-fixture-testing.ts",
+    "basic": "tsx 01-basic-query.ts",
+    "transactions": "tsx 02-batch-and-transaction.ts",
+    "errors": "tsx 03-error-handling.ts",
+    "server": "tsx 05-express-server.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@neondatabase/serverless": "^1.2.0",
+    "dbsdk": "file:../packages/dbsdk",
+    "express": "^5.1.0",
+    "pg": "^8.23.1"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.3",
+    "@types/node": "^26.6.4",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0"
+  }
+}
