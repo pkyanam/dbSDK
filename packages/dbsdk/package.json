@@ -1,7 +1,7 @@
 {
   "name": "dbsdk",
   "version": "0.1.0",
-  "description": "One typed PostgreSQL client for Supabase and Neon: parameterized SQL, honest capabilities, normalized errors, no silent failover.",
+  "description": "One typed SDK to create, manage, and query databases on Supabase and Neon: bring your provider API key, provision and manage resources through the management control plane, and run parameterized SQL. Honest capabilities, normalized errors, no silent failover.",
   "type": "module",
   "license": "MIT",
   "engines": {
@@ -15,7 +15,11 @@
     "neon",
     "sql",
     "sdk",
-    "typescript"
+    "typescript",
+    "management-api",
+    "provisioning",
+    "database-management",
+    "control-plane"
   ],
   "sideEffects": false,
   "files": [
@@ -48,6 +52,26 @@
       "types": "./dist/adapters/neon.d.ts",
       "import": "./dist/adapters/neon.js",
       "default": "./dist/adapters/neon.js"
+    },
+    "./management": {
+      "types": "./dist/management/index.d.ts",
+      "import": "./dist/management/index.js",
+      "default": "./dist/management/index.js"
+    },
+    "./management/testing": {
+      "types": "./dist/management/testing.d.ts",
+      "import": "./dist/management/testing.js",
+      "default": "./dist/management/testing.js"
+    },
+    "./management/supabase": {
+      "types": "./dist/management/supabase.d.ts",
+      "import": "./dist/management/supabase.js",
+      "default": "./dist/management/supabase.js"
+    },
+    "./management/neon": {
+      "types": "./dist/management/neon.d.ts",
+      "import": "./dist/management/neon.js",
+      "default": "./dist/management/neon.js"
     }
   },
   "scripts": {

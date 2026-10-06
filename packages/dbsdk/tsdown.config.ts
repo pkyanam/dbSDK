@@ -11,6 +11,13 @@ for (const name of ['postgres', 'supabase', 'neon']) {
   if (existsSync(file)) entry.push(file);
 }
 
+/** Management plane: core entry + fixture testing adapter + provider adapters when they land. */
+entry.push('src/management/index.ts', 'src/management/testing.ts');
+for (const name of ['supabase', 'neon']) {
+  const file = `src/management/${name}.ts`;
+  if (existsSync(file)) entry.push(file);
+}
+
 export default defineConfig({
   entry,
   format: 'esm',

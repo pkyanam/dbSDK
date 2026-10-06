@@ -22,6 +22,12 @@ export { DbError, isDbError, normalizeError, isWriteStatement } from './errors.j
 export type { DbErrorOptions, DbErrorCode } from './errors.js';
 export { capabilityMatrix, describeCapabilities, missingCapabilityError } from './capabilities.js';
 export type { CapabilityFeature } from './capabilities.js';
+export {
+  createManagement,
+  describeManagementCapabilities,
+  ManagementError,
+  isManagementError,
+} from './management/index.js';
 export type {
   BatchOptions,
   Database,
@@ -34,3 +40,34 @@ export type {
   SqlStatement,
   SqlTag,
 } from './types.js';
+export type {
+  CreateBranchSpec,
+  CreateCustomSpec,
+  CreateDatabaseSpec,
+  CreateProjectSpec,
+  CreateResourceSpec,
+  FetchLike,
+  KnownManagementProviderId,
+  KnownManagementResourceKind,
+  ManagementAdapter,
+  ManagementAdapterCapabilities,
+  ManagementCallOptions,
+  ManagementClient,
+  ManagementDeleteResult,
+  ManagementListQuery,
+  ManagementOperation,
+  ManagementPage,
+  ManagementProviderId,
+  ManagementResource,
+  ManagementResourceKind,
+  ManagementScope,
+  ManagementSecret,
+  ManagementStatus,
+  ManagementWriteResult,
+  ResourceRef,
+  UpdateResourceSpec,
+  WaitOptions,
+  WaitTarget,
+} from './management/types.js';
+export type { ManagementErrorCode, ManagementErrorOptions } from './management/errors.js';
+export type { ManagementCapabilityDescriptor } from './management/core.js';
