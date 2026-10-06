@@ -1,0 +1,81 @@
+{
+  "schema": 1,
+  "generated": "2026-10-06",
+  "source": "apps/web/content/docs/",
+  "product": {
+    "name": "dbSDK",
+    "tagline": "One typed PostgreSQL client for Supabase and Neon",
+    "package": "dbsdk",
+    "npmPublished": false,
+    "repository": "https://github.com/pkyanam/dbSDK",
+    "docs": ["https://dbsdk.com/docs", "https://database-sdk.dev"],
+    "engine": "postgresql",
+    "license": "MIT"
+  },
+  "pages": [
+    { "slug": "docs/getting-started", "title": "Getting started", "description": "Build from a local clone, pick an adapter, run a first parameterized query.", "order": 1 },
+    { "slug": "docs/capabilities", "title": "Capabilities", "description": "Per-transport capability matrix with evidence levels.", "order": 2 },
+    { "slug": "docs/queries", "title": "Queries", "description": "db.sql, db.query, parameterization, sql.tag helpers, result envelope, typing limits.", "order": 3 },
+    { "slug": "docs/transactions", "title": "Transactions", "description": "Interactive transactions, atomic batches, indeterminate write outcomes, no auto-retry.", "order": 4 },
+    { "slug": "docs/errors", "title": "Errors", "description": "DbError codes, SQLSTATE passthrough, retryable, indeterminate.", "order": 5 },
+    { "slug": "docs/adapters/postgres", "title": "Postgres adapter", "description": "Any PostgreSQL endpoint over TCP via pg.", "order": 6 },
+    { "slug": "docs/adapters/supabase", "title": "Supabase adapter", "description": "Explicit connection modes, strict validation, transaction-pooler guards, TLS/CA prerequisite, RLS boundary.", "order": 7 },
+    { "slug": "docs/adapters/neon", "title": "Neon adapter", "description": "HTTP, WebSocket, and TCP transaction transports with per-transport capabilities.", "order": 8 },
+    { "slug": "docs/testing", "title": "Testing", "description": "Fixture adapter with zero credentials; what fixtures can and cannot prove.", "order": 9 },
+    { "slug": "docs/frameworks", "title": "Frameworks", "description": "Express, Next.js, and serverless lifetime patterns.", "order": 10 },
+    { "slug": "docs/switching", "title": "Switching providers", "description": "What carries over between adapters; data never moves automatically.", "order": 11 },
+    { "slug": "docs/installation", "title": "Installation", "description": "Local clone, build, pack, and consumer setup; npm is not published.", "order": 12 },
+    { "slug": "docs/faq", "title": "FAQ", "description": "Scope, safety, evidence, and the things dbSDK does not do.", "order": 13 }
+  ],
+  "entrypoints": [
+    { "import": "dbsdk", "exposes": ["createDatabase", "sql", "DbError", "isDbError", "capabilityMatrix", "describeCapabilities"] },
+    { "import": "dbsdk/postgres", "driver": "pg" },
+    { "import": "dbsdk/supabase", "driver": "pg" },
+    { "import": "dbsdk/neon", "driver": "@neondatabase/serverless" },
+    { "import": "dbsdk/testing", "driver": null }
+  ],
+  "adapters": [
+    {
+      "id": "postgres",
+      "factory": "postgres",
+      "import": "dbsdk/postgres",
+      "transports": ["tcp"],
+      "modes": ["default"],
+      "capabilities": { "interactiveTransactions": true, "atomicBatch": true, "sessionState": "dedicated-session-only", "transport": "tcp" },
+      "evidence": "tests (real local PostgreSQL)"
+    },
+    {
+      "id": "supabase",
+      "factory": "supabase",
+      "import": "dbsdk/supabase",
+      "transports": ["tcp"],
+      "modes": ["direct", "session", "transaction"],
+      "capabilities": {
+        "interactiveTransactions": true,
+        "atomicBatch": true,
+        "sessionState": "dedicated-session-only; refused-before-dispatch on transaction mode for session-state statements",
+        "transport": "tcp"
+      },
+      "notes": "TLS certificate verification on by default; Supabase root CA required via pool.ssl.ca, or explicit opt-out.",
+      "evidence": "flags: docs; behavior additionally verified against a real local server (transaction-mode path)"
+    },
+    {
+      "id": "neon",
+      "factory": "neon",
+      "import": "dbsdk/neon",
+      "transports": ["http", "websocket", "tcp (postgres transaction transport)"],
+      "modes": ["http", "websocket", "http+postgres-tx"],
+      "capabilities": {
+        "interactiveTransactions": "true on websocket/postgres transports; refused-before-dispatch on http",
+        "atomicBatch": true,
+        "sessionState": false,
+        "transport": "http or websocket"
+      },
+      "evidence": "flags: docs; HTTP behavior additionally verified against the real Neon HTTP protocol via local proxy; websocket/postgres transports fixture-tested"
+    }
+  ],
+  "capabilitiesLegend": ["supported", "refused before dispatch", "guarded before dispatch", "not supported"],
+  "evidenceLegend": { "docs": "stated by official provider documentation, not executed by this project", "tests": "verified by this project's automated tests", "live": "verified against the real hosted service" },
+  "hostedVerificationPerformed": false,
+  "resultShape": { "rows": "Row[]", "rowCount": "number | null", "command": "string (optional)" }
+}

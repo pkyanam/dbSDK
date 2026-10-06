@@ -1,0 +1,92 @@
+---
+title: FAQ
+description: Straight answers about scope, safety, and what dbSDK does not do.
+sidebar:
+  order: 13
+---
+
+## Is dbSDK an ORM?
+
+No. There is no schema, no query builder, no migrations, no model
+definitions. You write SQL; dbSDK handles binding, results, errors,
+transactions, and capability checks. If you want a query builder or an
+ORM, use one; your SQL stays yours.
+
+## Does my SQL run on any database?
+
+Within the launch adapters, your SQL runs on PostgreSQL, on every adapter,
+unchanged. dbSDK does not translate SQL between engines, and no future
+engine family will be bridged by rewriting your queries. A wider set of
+services would come with the same client conventions and their own query
+dialects.
+
+## Is it safe against SQL injection?
+
+Parameterization is the default and the value path is closed: interpolated
+values always become bind parameters. Dynamic identifiers are the one
+thing values must never become, and they have a separate API
+(`sql.identifier`) that validates and quotes segments. If you construct
+SQL text with plain string concatenation, you are outside dbSDK's
+protections; the library cannot stop you from using `db.query({ text })`
+with hand-built strings.
+
+## What happens when I call a feature a transport cannot do?
+
+It fails before dispatch with `DbError` code `CAPABILITY`, naming the
+capability. Nothing is sent to the network, nothing falls back to another
+code path, and no error is invented after the fact. See
+[Capabilities](/docs/capabilities).
+
+## A write failed but might have committed. What now?
+
+The error is marked `indeterminate`. dbSDK does not retry it and does not
+tell you it failed definitively. Make the write idempotent (client
+generated primary key, `on conflict` upsert) so a retry is safe, or verify
+against the server before acting. See
+[Transactions](/docs/transactions).
+
+## Why no `live` evidence for hosted Supabase and Neon?
+
+Because this project has not queried hosted instances of either service.
+The test suite verifies behavior against a real local PostgreSQL and the
+real Neon HTTP protocol through a local proxy, and the docs describe that
+precisely. Evidence levels on the capabilities page say exactly what was
+checked and how.
+
+## Why does Supabase need a custom CA certificate?
+
+Supabase's Postgres endpoints present certificates signed by Supabase's
+own root CA, which is not in the Node trust store. dbSDK defaults to
+certificate verification on, so first connections fail loudly unless you
+supply that CA (from the Supabase dashboard) via `pool: { ssl: { ca } }`,
+or explicitly opt out with `ssl: { rejectUnauthorized: false }`. This is a
+deliberate tradeoff: encrypted-but-unverified TLS does not stop a
+man-in-the-middle. Details in the
+[Supabase adapter](/docs/adapters/supabase).
+
+## Can I use it in the browser?
+
+No. Connection strings are secrets and belong on a server. There is no
+browser build. If you need database access from client code, put an API in
+front of it.
+
+## Can I use the Supabase Data API or RLS with the user's identity?
+
+Not through this adapter. It speaks the PostgreSQL wire protocol as the
+role in your connection string. Policies based on `auth.uid()` evaluate
+without request context on a plain SQL connection. The PostgREST path is a
+different surface, and dbSDK does not re-implement it. See the RLS section
+of the [Supabase adapter](/docs/adapters/supabase) for the two patterns
+that work.
+
+## Where is the changelog?
+
+[CHANGELOG.md](https://github.com/pkyanam/dbSDK/blob/main/CHANGELOG.md) in
+the repository, in Keep a Changelog format. The current release is 0.1.0
+source-only; there is nothing published to npm to install.
+
+## How do I report a bug or contribute?
+
+See [CONTRIBUTING.md](https://github.com/pkyanam/dbSDK/blob/main/CONTRIBUTING.md)
+and [SECURITY.md](https://github.com/pkyanam/dbSDK/blob/main/SECURITY.md).
+The test suite runs without credentials; live checks use local containers.

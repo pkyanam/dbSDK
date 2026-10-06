@@ -1,0 +1,102 @@
+---
+title: Errors
+description: One normalized DbError with codes, SQLSTATE passthrough, retryable, and the indeterminate flag for writes with unknown outcomes.
+sidebar:
+  order: 5
+---
+
+Every error that escapes the client is a `DbError` (or carries one as its
+cause), regardless of which adapter or transport produced it. Driver errors
+keep their information: the original error is attached as `cause`, and the
+PostgreSQL `SQLSTATE` code is passed through when the server reported one.
+
+## The shape
+
+```ts
+import { isDbError } from "dbsdk";
+
+try {
+  await db.sql`select * from does_not_exist`;
+} catch (error) {
+  if (isDbError(error)) {
+    error.code;       // "SYNTAX" here (SQLSTATE 42P01)
+    error.sqlstate;   // "42P01"
+    error.retryable;  // false
+    error.indeterminate; // false: nothing was written
+    error.adapterId;  // "neon" | "supabase" | "postgres"
+    error.cause;      // the underlying driver error, preserved
+  }
+}
+```
+
+## Codes
+
+| Code | Meaning | Typical source |
+| --- | --- | --- |
+| `CAPABILITY` | The transport cannot do this operation | `transaction()` on Neon HTTP, session-state statements on the transaction pooler |
+| `CONFIGURATION` | The adapter was configured inconsistently | connection string contradicting the declared Supabase mode; `undefined` parameters |
+| `CONSTRAINT` | Constraint violation | SQLSTATE class 23, for example unique violations (23505) |
+| `CONNECTION` | The connection failed or was closed | dropped socket, operations after `close()`, Node transport errors like `EPIPE` or `ECONNRESET` |
+| `TIMEOUT` | A timeout fired | SQLSTATE 57014, client statement timeouts |
+| `PERMISSION` | The server refused for permissions or row security | SQLSTATE 42501, the common RLS denial |
+| `SYNTAX` | The server could not parse the SQL | SQLSTATE class 42 except permission errors |
+| `TRANSACTION` | Transaction-state problems | serialization failures (40001), deadlocks (40P01), invalid transaction state |
+| `DATA` | Data exceptions | SQLSTATE class 22, for example invalid text representation |
+| `UNKNOWN` | Anything not yet classified | driver-specific failures without an SQLSTATE |
+
+Classification runs on the SQLSTATE when there is one, so PostgreSQL's own
+taxonomy is preserved. Code branching plus `sqlstate` gives you both a
+stable vocabulary and exact precision when you need it.
+
+## `retryable`
+
+`true` on connection failures, timeouts, serialization failures (40001), and
+deadlocks (40P01). It means "retrying this exact statement is safe in
+principle". It is information only: dbSDK never retries on your behalf.
+
+## `indeterminate`
+
+`true` when a write may or may not have been committed and dbSDK cannot
+know which. Set when a connection or timeout error occurs:
+
+- during a statement whose first keyword is a write (`insert`, `update`,
+  `delete`, `merge`, `create`, `grant`, and similar - note that all
+  `explain` statements are included, because `explain analyze` executes its
+  statement),
+- inside a batch that contains any write-shaped statement,
+- escaping a `transaction()` callback, where dbSDK cannot know whether your
+  callback wrote before the failure,
+- in a multi-statement parameterless string, where everything after a
+  semicolon also ran.
+
+Top-level read-only statements are never marked on a transport failure.
+Inside a transaction, any error without a server SQLSTATE is marked,
+because dbSDK cannot know whether the callback wrote. Pre-dispatch failures
+(capability, configuration) are never marked, because nothing was sent.
+
+What dbSDK does about it: nothing automatic. No retry, no replay, no
+failover. See [Transactions](/docs/transactions) for how to make retries
+safe with idempotent writes.
+
+## Errors that are not from the database
+
+Your own exceptions are normalized too. If ordinary code inside
+`transaction()` throws (a business-rule error, for example), what reaches
+your `catch` is a `DbError` with code `UNKNOWN`, `indeterminate: true` (the
+transaction was rolled back, but dbSDK cannot prove nothing was written
+before the throw), your message, and the original error on `cause`. If you
+want clean handling of deliberate aborts, throw a `DbError` yourself:
+user-thrown `DbError`s pass through unchanged, keeping their code and
+`indeterminate: false`.
+
+That also matters for the retry pattern above: `indeterminate: true` on a
+transaction can be a business abort, not a network problem. Distinguish by
+`error.code === 'UNKNOWN'` and the `cause` chain, or by throwing typed
+errors for expected cases.
+
+## Reporting and diagnostics
+
+`DbError` messages contain no credentials. Connection strings stay in your
+environment; configuration errors name only the host, port, and username
+pieces needed to diagnose a mode mismatch. The `cause` chain is preserved
+for logs, so log the full error, not just the message.

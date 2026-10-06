@@ -1,0 +1,128 @@
+---
+title: Capabilities
+description: What each dbSDK adapter and transport supports, with the evidence behind each cell.
+sidebar:
+  order: 2
+---
+
+Every adapter declares its capabilities, and the client enforces them before
+any network traffic. There is no silent fallback: if a transport cannot do
+something, the call fails with a `DbError` of code `CAPABILITY` and nothing
+is sent. This page states the current matrix and the evidence behind it.
+
+## The matrix
+
+| Capability | postgres (TCP) | supabase direct | supabase session | supabase transaction | neon http | neon + websocket tx | neon + postgres tx |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Transport | tcp | tcp | tcp | tcp | http | http (queries) | http (queries) |
+| Parameterized `query()` | yes | yes | yes | yes | yes | yes | yes |
+| Interactive `transaction()` | yes | yes | yes | yes, one leased connection | refused before dispatch | yes, short-lived WebSocket pool per transaction | yes, `pg` pool against the direct endpoint |
+| Atomic `batch()` | yes | yes | yes | yes | yes, native single HTTP round trip | yes | yes |
+| Session state | on a leased session | on a leased session | on a leased session | guarded before dispatch | no | no on pooled hosts, yes on direct | no on pooled hosts, yes on direct |
+| Reusable named prepared statements | no | no | no | no | no | no | no |
+
+Status words used in this table and in code:
+
+- **supported**: the operation runs.
+- **refused before dispatch**: the client throws `CAPABILITY` before any
+  network traffic. Example: `transaction()` on Neon HTTP.
+- **guarded before dispatch**: session-state statements (`SET`, `RESET`,
+  `LISTEN`/`NOTIFY`, `PREPARE`/`DEALLOCATE`, `CREATE TEMP`, `DECLARE ...
+  WITH HOLD`) are rejected before dispatch on the Supabase transaction
+  pooler, because that pooler cannot carry them. Disable with
+  `enforceSessionRestrictions: false` if you know your deployment allows it.
+- **not supported**: the capability does not exist for that transport.
+
+## What "session state" means here
+
+`capabilities.sessionState: true` means session-level state (`SET`, temporary
+objects, `LISTEN`/`NOTIFY`, session advisory locks) works on a single
+dedicated session: inside `transaction()`, which leases exactly one
+connection, or on a client you lease yourself through `raw`.
+
+It does not mean state persists between separate top-level queries. Pool
+backed adapters may use a different pooled connection for each `db.sql`
+call, so this does not stick:
+
+```ts
+await db.sql`set statement_timeout = '5s'`;   // applies to one pooled session
+await db.sql`show statement_timeout`;        // may run on another session
+```
+
+Inside `transaction()`, it does stick, because the callback runs on one
+leased connection. If you need session-scoped state across calls, hold a
+client from `raw` or run the work inside a transaction.
+
+## Batches and transactions are different tools
+
+- `db.transaction(fn)` runs your callback with multi-round-trip logic on one
+  connection. It needs an interactive-transaction capability.
+- `db.batch(statements)` is atomic by default: on Neon HTTP it is a single
+  round trip through the driver's native batch; on TCP transports it leases
+  one connection and wraps `BEGIN`/`COMMIT` around the statements. Neither
+  form accepts control flow between statements; if you need `if`, use
+  `transaction()`.
+
+Parameterized binding is available on every row of the table. It does not
+depend on prepared statements: dbSDK uses unnamed protocol statements and
+never creates reusable named prepared statements, so binding keeps working
+even on the Supabase transaction pooler, where named prepared statements
+cannot.
+
+## Evidence levels
+
+Every capability carries an evidence level, also exposed at runtime in
+`db.capabilities.evidence`:
+
+- `docs`: stated by official provider documentation, not executed by this project.
+- `tests`: verified by this project's automated tests (fixture or contract tests, and live checks against local servers).
+- `live`: verified against the real hosted service.
+
+The current runtime levels are conservative and deliberately so: the
+`postgres` adapter declares `tests` (its behavior is verified by this
+project's automated tests against a real local Postgres 17 container), while
+the Supabase and Neon adapters declare `docs` for every capability - their
+transport facts come from provider documentation. The local verification
+runs are real and reproducible: a local Postgres 17 container, the Neon HTTP
+protocol through a local proxy, and the Supabase adapter against a local
+server exercised the transaction-pooler path (commands below and in
+[CONTRIBUTING](https://github.com/pkyanam/dbSDK/blob/main/CONTRIBUTING.md)).
+Hosted Supabase and Neon projects have not been queried by this project, and
+no table on this site claims otherwise.
+
+## The runtime surface
+
+```ts
+console.log(db.capabilities);
+// {
+//   interactiveTransactions: false,
+//   atomicBatch: true,
+//   sessionState: false,
+//   transport: "http",
+//   evidence: { interactiveTransactions: "docs", atomicBatch: "docs", ... }
+// }
+```
+
+Check `db.capabilities` when writing transport-sensitive code instead of
+branching on the adapter id. The adapter id can gain new transports; the
+capability flags are the contract.
+
+## Reproducing the local verification
+
+The test suite runs without any database (fixtures only), and the live local
+checks run against real servers you start yourself:
+
+```bash
+docker run -d --name dbsdk-pg-test -e POSTGRES_PASSWORD=dbsdk -e POSTGRES_DB=dbsdk -p 15432:5432 postgres:17-alpine
+docker run -d --name dbsdk-neon-proxy \
+  -e PG_CONNECTION_STRING='postgres://postgres:dbsdk@host.docker.internal:15432/dbsdk' \
+  -p 14444:4444 ghcr.io/timowilhelm/local-neon-http-proxy:main
+
+DBSDK_TEST_POSTGRES_URL='postgres://postgres:dbsdk@localhost:15432/dbsdk' \
+DBSDK_TEST_NEON_CONNECTION_STRING='postgres://postgres:dbsdk@db.localtest.me:5432/dbsdk' \
+DBSDK_TEST_NEON_HTTP_ENDPOINT='http://localhost:14444/sql' \
+pnpm --filter dbsdk test
+```
+
+The verified state at the time of writing: 182 passed, 0 failed, 0 skipped
+with the live environment running.

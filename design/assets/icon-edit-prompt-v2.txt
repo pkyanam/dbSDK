@@ -1,0 +1,5 @@
+Edit the image at design/assets/icon-master-v2.png (1254x1254, transparent background, navy rounded-square tile with a cream converging glyph and one red node).
+
+Keep the composition exactly as it is: the navy #003049 rounded-square tile, all cream #FDF0D5 glyph lines and wedge, the single muted blue #669BBC line, the single red #C1121F node, and the fully transparent area outside the tile. Do not move, reshape, add, or remove any glyph element. Do not add text or a background.
+
+Repair ONLY the tile fill. The navy tile currently has faint cloudy semi-transparent smudge patches inside it: two along the right side of the tile (one at about one-third of the tile height, one at about the middle), and two in the lower-left interior. Repaint the entire tile interior as one solid, fully opaque, perfectly flat navy #003049 fill right up to the tile outline, with zero transparency, zero texture, zero cloudiness, and zero shading variation anywhere inside the tile. Preserve the crisp anti-aliased tile edge. Preserve the true alpha channel: fully transparent outside the tile, fully opaque inside.

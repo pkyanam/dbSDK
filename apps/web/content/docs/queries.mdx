@@ -1,0 +1,135 @@
+---
+title: Queries
+description: The two query entry points, parameterization rules, reusable statements, and what the type parameter does and does not guarantee.
+sidebar:
+  order: 3
+---
+
+dbSDK exposes two ways to run SQL. Both bind parameters; neither ever splices
+a value into SQL text.
+
+## `db.sql`: the tagged template
+
+```ts
+const result: QueryResult<{ id: string; email: string }> = await db.sql`
+  select id, email from users where id = ${userId}
+`;
+const { rows } = result; // rows: Array<{ id: string; email: string }>
+```
+
+Why annotate the result instead of writing `db.sql<Row>\`...\``? TypeScript
+only supports simple type arguments on tagged templates; a multi-property
+object type like `{ id: string; email: string }` inside the angle brackets
+is a syntax error. Annotating the returned `QueryResult` always works and
+reads the same way.
+
+Every interpolated value becomes a positional parameter (`$1`, `$2`, ...).
+The number of placeholders always matches the number of values. This makes
+injection the wrong shape by construction: user input arrives as data, no
+matter what it contains.
+
+What interpolation cannot do:
+
+- It cannot produce an identifier. `db.sql` from a table name interpolates
+  as a parameter value, which is a type error in PostgreSQL, not a hole.
+- It cannot produce a keyword, a fragment, or multiple values. If you need
+  those, use the builder below.
+
+## `db.query`: reusable statements
+
+The package root exports a `sql` tag that builds a statement you can store,
+reuse, and compose:
+
+Statements built with the `sql` tag are `{ text, params }` objects, so you
+can store them and pass them to `db.query`. Nesting one statement inside
+another inlines its text and merges its parameters, so reusable pieces
+compose:
+
+```ts
+import { sql } from "dbsdk";
+
+const activeUsers = sql`select id from users where active = ${true}`;
+await db.sql`select count(*) from (${activeUsers}) t`;
+// text: 'select count(*) from (select id from users where active = $1) t'
+```
+
+Helpers:
+
+- `sql.identifier(name)` injects a dynamic identifier. It accepts a string
+  or an array of segments (a dotted path); every segment is validated
+  against `^[A-Za-z_][A-Za-z0-9_$]*$` and double-quoted. This is the only
+  way a dynamic identifier reaches the query.
+- `sql.join(fragments, separator?)` combines fragments. The separator is a
+  literal string, defaulting to a single space.
+
+```ts
+import { sql } from "dbsdk";
+
+const ids = [1, 2, 3];
+await db.query(sql`select * from users where id in (${sql.join(ids.map((id) => sql`${id}`), ", ")})`);
+```
+
+Parameter validation is uniform: `undefined` is rejected (use `null`),
+functions and symbols are rejected. The same rules apply to `db.sql`,
+`db.query`, and `db.batch`. One exception to know about: parameters you
+pass to the `tx.query(text, params)` executor inside a transaction callback
+currently skip this validation and reach the driver as given, so keep the
+same discipline there (see [Transactions](/docs/transactions)).
+
+## The result envelope
+
+Every call returns `{ rows, rowCount, command? }`:
+
+- `rows`: an array of row objects. Empty array when nothing matched.
+- `rowCount`: the affected-row count, or `null` when the command does not
+  report one.
+- `command`: the PostgreSQL command tag (for example `SELECT`, `INSERT`,
+  `UPDATE`) when the driver reports one.
+
+That is the whole shape. There are no timing fields and no field-metadata
+arrays; if you need those, use the typed `raw` escape hatch on the adapter.
+
+## Typing: caller assertions, not verification
+
+```ts
+import type { QueryResult } from "dbsdk";
+
+const result: QueryResult<{ id: string; createdAt: Date }> =
+  await db.sql`select id, created_at from events`;
+```
+
+The annotation tells TypeScript what you believe the rows are. Nothing
+checks it at runtime. This is deliberate: dbSDK does not connect to your
+schema, parse your migrations, or pretend to know your types. Keep the types
+next to the queries that assert them, and let your tests catch drift.
+
+Two consequences worth knowing:
+
+- PostgreSQL `bigint` and `numeric` values are returned as strings by the
+  underlying driver, to preserve precision. Do not declare them as `number`
+  unless you accept the precision loss.
+- Timestamps decode to JavaScript `Date` values by default. JSON and arrays
+  decode as you would expect.
+
+## Dynamic identifiers, the safe way
+
+```ts
+import { sql } from "dbsdk";
+
+await db.query(sql`select * from ${sql.identifier("public", "users")}`);
+// text: 'select * from "public"."users"'
+```
+
+If a segment contains characters outside `^[A-Za-z_][A-Za-z0-9_$]*$`, the
+build throws before any query runs. There is no option to disable the
+validation, because there is no safe way to interpolate an identifier from
+untrusted input.
+
+## Simple query protocol
+
+Calling `db.query({ text })` without `params` uses PostgreSQL's simple query
+protocol, which executes every statement in the string. That is powerful and
+sharp: a stray semicolon in a parameterless string runs the next statement.
+When a string contains multiple statements, dbSDK treats the outcome of a
+failed multi-statement write as indeterminate (see
+[Errors](/docs/errors)). Prefer parameterized statements as the default.

@@ -1,0 +1,1489 @@
+---
+import PageLayout from "blume/components/layout/PageLayout.astro";
+import data from "blume:data";
+
+const { config } = data;
+
+/* ------------------------------------------------------------------ */
+/* Adapter switcher data. One source of truth, serialized for the      */
+/* client script. Code samples use the real public API of the SDK.     */
+/* ------------------------------------------------------------------ */
+
+const t = (cls: string, s: string) => `<span class="${cls}">${s}</span>`;
+const K = (s: string) => t("tk-k", s);
+const S = (s: string) => t("tk-s", s);
+const C = (s: string) => t("tk-c", s);
+const F = (s: string) => t("tk-f", s);
+const V = (s: string) => t("tk-v", s);
+const P = (s: string) => t("tk-p", s);
+
+const stripTags = (html: string) => html.replace(/<[^>]+>/g, "");
+
+const IMPORT_CORE =
+  K("import") + " " + P("{ ") + V("createDatabase") + P(" }") + " " + K("from") + " " + S('"dbsdk"') + P(";");
+
+const SHARED_QUERY_HTML =
+  K("const") + " " + P("{ ") + V("rows") + P(", ") + V("rowCount") + P(", ") + V("command") + P(" }") + " " + P("= ") + K("await") + " " + V("db") + P(".") + F("sql") + P("`") + "\n" +
+  "  " + V("select id, email from users") + "\n" +
+  "  " + V("where id = ") + P("\${") + V("userId") + P("}") + "\n" +
+  P("`") + P(";");
+
+const SHARED_QUERY_TEXT = stripTags(SHARED_QUERY_HTML);
+
+type CapState = "ok" | "warn" | "no";
+type Tab = {
+  id: string;
+  name: string;
+  sub: string;
+  file: string;
+  html: string;
+  caps: { label: string; state: CapState; note: string }[];
+  note: string;
+  evidence: string;
+};
+
+const tabs: Tab[] = [
+  {
+    id: "postgres",
+    name: "Postgres",
+    sub: "TCP, any host",
+    file: "postgres.ts",
+    html:
+      IMPORT_CORE + "\n" +
+      K("import") + " " + P("{ ") + V("postgres") + P(" }") + " " + K("from") + " " + S('"dbsdk/postgres"') + P(";") + "\n\n" +
+      K("const") + " " + V("db") + " " + P("= ") + F("createDatabase") + P("({") + "\n" +
+      "  " + V("adapter") + P(": ") + F("postgres") + P("({") + "\n" +
+      "    " + V("connectionString") + P(": ") + V("process") + P(".") + V("env") + P(".") + V("DATABASE_URL") + P(",") + "\n" +
+      "    " + V("max") + P(": ") + S("10") + P(",") + "\n" +
+      "  " + P("}),") + "\n" +
+      P("});"),
+    caps: [
+      { label: "Interactive transactions", state: "ok", note: "db.transaction(callback)" },
+      { label: "Atomic batch", state: "ok", note: "one connection, BEGIN to COMMIT" },
+      { label: "Session state", state: "ok", note: "inside transaction() or raw; not across pooled queries" },
+      { label: "Named prepared statements", state: "no", note: "unnamed protocol statements only" },
+    ],
+    note: "The plain Postgres adapter. Any host that speaks the wire protocol, including a local Docker instance for tests.",
+    evidence: "Verified by fixtures and a live local PostgreSQL 17.",
+  },
+  {
+    id: "supabase-direct",
+    name: "Supabase",
+    sub: "direct, port 5432",
+    file: "supabase-direct.ts",
+    html:
+      IMPORT_CORE + "\n" +
+      K("import") + " " + P("{ ") + V("supabase") + P(" }") + " " + K("from") + " " + S('"dbsdk/supabase"') + P(";") + "\n\n" +
+      K("const") + " " + V("db") + " " + P("= ") + F("createDatabase") + P("({") + "\n" +
+      "  " + V("adapter") + P(": ") + F("supabase") + P("({") + "\n" +
+      "    " + C("// Dashboard URL plus ?sslmode=verify-full&sslrootcert=<CA path>") + "\n" +
+      "    " + V("connectionString") + P(": ") + V("process") + P(".") + V("env") + P(".") + V("SUPABASE_DB_URL") + P(",") + "  " + C("// db.<ref>.supabase.co:5432") + "\n" +
+      "    " + V("connectionMode") + P(": ") + S('"direct"') + P(",") + "\n" +
+      "  " + P("}),") + "\n" +
+      P("});"),
+    caps: [
+      { label: "Interactive transactions", state: "ok", note: "one leased connection" },
+      { label: "Atomic batch", state: "ok", note: "one connection, BEGIN to COMMIT" },
+      { label: "Session state", state: "ok", note: "dedicated session only; top-level queries pool-hop" },
+      { label: "Named prepared statements", state: "no", note: "unnamed protocol statements only" },
+    ],
+    note: "The direct connection to your project's Postgres. TLS verification is on and uses Supabase's private CA, supplied by the sslrootcert URL parameter (docs/adapters/supabase).",
+    evidence: "Verified by fixtures and configuration validation. A hosted Supabase project has not been exercised.",
+  },
+  {
+    id: "supabase-session",
+    name: "Supabase",
+    sub: "session pooler, 5432",
+    file: "supabase-session.ts",
+    html:
+      IMPORT_CORE + "\n" +
+      K("import") + " " + P("{ ") + V("supabase") + P(" }") + " " + K("from") + " " + S('"dbsdk/supabase"') + P(";") + "\n\n" +
+      K("const") + " " + V("db") + " " + P("= ") + F("createDatabase") + P("({") + "\n" +
+      "  " + V("adapter") + P(": ") + F("supabase") + P("({") + "\n" +
+      "    " + C("// Pooler URL plus ?sslmode=verify-full&sslrootcert=<CA path>") + "\n" +
+      "    " + V("connectionString") + P(": ") + V("poolerUrl") + P(",") + "  " + C("// aws-<id>-<region>.pooler...:5432") + "\n" +
+      "    " + V("connectionMode") + P(": ") + S('"session"') + P(",") + "\n" +
+      "  " + P("}),") + "\n" +
+      P("});"),
+    caps: [
+      { label: "Interactive transactions", state: "ok", note: "one leased connection" },
+      { label: "Atomic batch", state: "ok", note: "one connection, BEGIN to COMMIT" },
+      { label: "Session state", state: "ok", note: "dedicated session only; top-level queries pool-hop" },
+      { label: "Named prepared statements", state: "no", note: "unnamed protocol statements only" },
+    ],
+    note: "The session pooler on port 5432. The pooler username must be postgres.<project-ref>; TLS uses Supabase's private CA the same way as direct mode (docs/adapters/supabase).",
+    evidence: "Verified by fixtures and configuration validation. A hosted Supabase project has not been exercised.",
+  },
+  {
+    id: "supabase-transaction",
+    name: "Supabase",
+    sub: "transaction pooler, 6543",
+    file: "supabase-transaction.ts",
+    html:
+      IMPORT_CORE + "\n" +
+      K("import") + " " + P("{ ") + V("supabase") + P(" }") + " " + K("from") + " " + S('"dbsdk/supabase"') + P(";") + "\n\n" +
+      K("const") + " " + V("db") + " " + P("= ") + F("createDatabase") + P("({") + "\n" +
+      "  " + V("adapter") + P(": ") + F("supabase") + P("({") + "\n" +
+      "    " + C("// Pooler URL plus ?sslmode=verify-full&sslrootcert=<CA path>") + "\n" +
+      "    " + V("connectionString") + P(": ") + V("poolerUrl") + P(",") + "  " + C("// transaction pooler, port 6543") + "\n" +
+      "    " + V("connectionMode") + P(": ") + S('"transaction"') + P(",") + "\n" +
+      "  " + P("}),") + "\n" +
+      P("});") + "\n\n" +
+      C("// Session-level SET, LISTEN and temp objects are") + "\n" +
+      C("// refused before dispatch. Inside a transaction,") + "\n" +
+      C("// SET LOCAL is allowed."),
+    caps: [
+      { label: "Interactive transactions", state: "ok", note: "one leased connection" },
+      { label: "Atomic batch", state: "ok", note: "runs as a single transaction" },
+      { label: "Session state", state: "no", note: "guarded before dispatch on the pooler" },
+      { label: "Named prepared statements", state: "no", note: "unnamed protocol statements only" },
+    ],
+    note: "The transaction pooler on port 6543, sized for serverless workloads. Session-level statements are rejected before dispatch rather than being sent to a pooler that cannot honor them.",
+    evidence: "Mode semantics verified against a live local PostgreSQL through the transaction path.",
+  },
+  {
+    id: "neon-http",
+    name: "Neon",
+    sub: "HTTP transport",
+    file: "neon-http.ts",
+    html:
+      IMPORT_CORE + "\n" +
+      K("import") + " " + P("{ ") + V("neon") + P(" }") + " " + K("from") + " " + S('"dbsdk/neon"') + P(";") + "\n\n" +
+      K("const") + " " + V("db") + " " + P("= ") + F("createDatabase") + P("({") + "\n" +
+      "  " + V("adapter") + P(": ") + F("neon") + P("({") + "\n" +
+      "    " + V("connectionString") + P(": ") + V("process") + P(".") + V("env") + P(".") + V("DATABASE_URL") + P(",") + "\n" +
+      "    " + V("transport") + P(": ") + S('"http"') + P(",") + "  " + C("// the default") + "\n" +
+      "  " + P("}),") + "\n" +
+      P("});") + "\n\n" +
+      C("// db.transaction() is refused before dispatch.") + "\n" +
+      C("// db.batch(statements) is one native HTTP") + "\n" +
+      C("// round-trip, atomic by default."),
+    caps: [
+      { label: "Interactive transactions", state: "no", note: "refused before dispatch" },
+      { label: "Atomic batch", state: "ok", note: "one native HTTP round-trip" },
+      { label: "Session state", state: "no", note: "HTTP is stateless" },
+      { label: "Named prepared statements", state: "no", note: "none over HTTP" },
+    ],
+    note: "One HTTP request per statement or batch, wherever fetch runs. No sockets to hold open, and no interactive transactions.",
+    evidence: "HTTP path verified against a local Neon protocol proxy in front of PostgreSQL 17.",
+  },
+  {
+    id: "neon-websocket",
+    name: "Neon",
+    sub: "WebSocket transport",
+    file: "neon-websocket.ts",
+    html:
+      IMPORT_CORE + "\n" +
+      K("import") + " " + P("{ ") + V("neon") + P(" }") + " " + K("from") + " " + S('"dbsdk/neon"') + P(";") + "\n\n" +
+      K("const") + " " + V("db") + " " + P("= ") + F("createDatabase") + P("({") + "\n" +
+      "  " + V("adapter") + P(": ") + F("neon") + P("({") + "\n" +
+      "    " + V("connectionString") + P(": ") + V("process") + P(".") + V("env") + P(".") + V("DATABASE_URL") + P(",") + "\n" +
+      "    " + V("transport") + P(": ") + S('"websocket"') + P(",") + "\n" +
+      "  " + P("}),") + "\n" +
+      P("});") + "\n\n" +
+      C("// Keep the pool within one request when") + "\n" +
+      C("// running in a serverless runtime."),
+    caps: [
+      { label: "Interactive transactions", state: "ok", note: "short-lived pool per transaction" },
+      { label: "Atomic batch", state: "ok", note: "one connection" },
+      { label: "Session state", state: "warn", note: "direct endpoint, dedicated session; pooled hosts: no." },
+      { label: "Named prepared statements", state: "no", note: "unnamed protocol statements only" },
+    ],
+    note: "The Neon driver's WebSocket pool for interactive transactions. Session state holds on a dedicated session over the direct endpoint; pooled hosts report it unavailable.",
+    evidence: "Verified by fixtures. Both Neon transports are implemented in the adapter source.",
+  },
+];
+
+const tabsJson = JSON.stringify(tabs);
+const firstTab = tabs[0];
+---
+
+<PageLayout
+  site={{ title: config.title, description: config.description }}
+  logo={config.logo}
+  banner={config.banner}
+  analytics={config.analytics}
+  navigation={data.navigation}
+  favicon={config.favicon}
+  fontCssVars={data.fontCssVars}
+  themeMode={config.theme.mode}
+  searchEnabled={config.search.enabled}
+  siteUrl={config.site}
+  ogEnabled={config.og.enabled}
+  page={{ title: "dbSDK: one SQL surface for Postgres", description: config.description }}
+>
+  <!-- ================= HERO ================= -->
+  <header class="dk-hero">
+    <div class="dk-shell dk-hero-grid">
+      <div class="dk-hero-copy">
+        <h1 class="dk-h1">
+          <span class="dk-h1-line">One SQL surface.</span>
+          <span class="dk-h1-line dk-h1-accent">Every Postgres.</span>
+        </h1>
+        <p class="dk-lede">
+          dbSDK is a typed PostgreSQL client for Supabase and Neon. Parameterized
+          queries through db.sql, one result shape on every adapter, transports
+          you choose on purpose, and errors that tell the truth when a
+          connection drops.
+        </p>
+        <div class="dk-cta-row">
+          <a class="dk-cta" href="/getting-started">Read the docs</a>
+          <a class="dk-cta dk-cta-ghost" href="https://github.com/pkyanam/dbSDK" rel="noopener">View on GitHub</a>
+        </div>
+        <p class="dk-facts">
+          PostgreSQL only, on purpose <span aria-hidden="true">·</span> MIT
+          licensed <span aria-hidden="true">·</span> Supabase and Neon launch
+          adapters
+        </p>
+      </div>
+
+      <figure class="dk-plate" data-art-slot="hero-plate">
+        <picture>
+          <source
+            type="image/webp"
+            srcset="/brand/banner-v2-768.webp 768w, /brand/banner-v2-1280.webp 1280w, /brand/banner-v2.webp 1536w"
+            sizes="(max-width: 60rem) 92vw, 32rem"
+          />
+          <img
+            src="/brand/banner-v2.webp"
+            alt="Generated dbSDK artwork: muted blue connection lines converging into ordered navy rows with one red signal node."
+            width="1536"
+            height="1024"
+            loading="eager"
+            decoding="async"
+          />
+        </picture>
+      </figure>
+    </div>
+
+    <div class="dk-shell">
+      <p class="dk-masthead" aria-hidden="true">
+        <span class="dk-masthead-db">db</span><span class="dk-masthead-sdk">SDK</span>
+      </p>
+    </div>
+  </header>
+
+  <!-- ================= SWITCHER ================= -->
+  <section class="dk-section" id="switcher">
+    <div class="dk-shell dk-head-grid">
+      <h2 class="dk-h2">
+        Swap the adapter.<br />Nothing else moves.
+      </h2>
+      <p class="dk-head-sub">
+        Six connection modes, one client. You declare the mode you want, dbSDK
+        validates it, refuses what it cannot honor, and never switches anything
+        behind your back. The adapter docs also cover a seventh documented
+        combination: Neon HTTP queries with transactions carried over TCP via
+        <code>transactionTransport: "postgres"</code>.
+      </p>
+    </div>
+
+    <div class="dk-shell">
+      <div class="dk-switcher" id="adapter-switcher">
+        <div class="dk-rail">
+          <div class="dk-tabs" role="tablist" aria-label="Adapter and transport" aria-orientation="vertical">
+            {tabs.map((tab, i) => (
+              <button
+                role="tab"
+                class="dk-tab"
+                id={`dk-tab-${tab.id}`}
+                data-tab={tab.id}
+                aria-selected={i === 0 ? "true" : "false"}
+                aria-controls="dk-panel"
+                tabindex={i === 0 ? 0 : -1}
+                type="button"
+              >
+                <span class="dk-tab-name">{tab.name}</span>
+                <span class="dk-tab-sub">{tab.sub}</span>
+              </button>
+            ))}
+          </div>
+          <div class="dk-rail-note">
+            <p class="dk-note" id="dk-note">{firstTab.note}</p>
+            <p class="dk-evidence" id="dk-evidence">{firstTab.evidence}</p>
+          </div>
+        </div>
+
+        <div
+          class="dk-stage"
+          id="dk-panel"
+          role="tabpanel"
+          aria-labelledby={`dk-tab-${firstTab.id}`}
+          tabindex="0"
+        >
+          <div class="dk-stage-top">
+            <div class="dk-code">
+              <div class="dk-code-bar">
+                <span class="dk-code-file" id="dk-file">{firstTab.file}</span>
+                <button class="dk-copy" id="dk-copy" type="button" aria-label="Copy code example">
+                  <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.4">
+                    <rect x="5.5" y="5.5" width="8" height="8" rx="1.2"></rect>
+                    <path d="M10.5 5.5v-2a1 1 0 0 0-1-1h-6a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2"></path>
+                  </svg>
+                  <span class="dk-copy-label">Copy</span>
+                </button>
+              </div>
+              <pre class="dk-code-pre" id="dk-code" set:html={firstTab.html} />
+            </div>
+
+            <aside class="dk-caps">
+              <ul class="dk-caps-list" id="dk-caps">
+                {firstTab.caps.map((cap) => (
+                  <li class={`dk-cap dk-cap-${cap.state}`}>
+                    <span class="dk-cap-dot" aria-hidden="true"></span>
+                    <div>
+                      <p class="dk-cap-label">{cap.label}</p>
+                      <p class="dk-cap-note">{cap.note}</p>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            </aside>
+          </div>
+
+          <div class="dk-shared">
+            <div class="dk-shared-head">
+              <span class="dk-shared-label">The same statement on every adapter</span>
+              <span class="dk-shared-note">setup changes, the query does not</span>
+            </div>
+            <div class="dk-shared-body">
+              <pre class="dk-shared-code" id="dk-shared" set:html={SHARED_QUERY_HTML} />
+              <div class="dk-result">
+                <p class="dk-result-label">Example result</p>
+                <pre class="dk-result-pre">{`{
+  "rows": [
+    { "id": "usr_8f2c41", "email": "ada@example.com" }
+  ],
+  "rowCount": 1,
+  "command": "SELECT"
+}`}</pre>
+                <p class="dk-result-note">
+                  Identical envelope on every adapter: rows, rowCount, and the
+                  PostgreSQL command tag when one is reported. Real output
+                  arrives when you connect your own database.
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= CAPABILITIES ================= -->
+  <section class="dk-section dk-section-alt" id="capabilities">
+    <div class="dk-shell dk-head-grid">
+      <h2 class="dk-h2">
+        Capabilities,<br />stated plainly.
+      </h2>
+      <p class="dk-head-sub">
+        What each transport supports, what it refuses, and how each claim was
+        verified. Unsupported operations fail before dispatch. A supported
+        write can still fail in flight: an outcome the client cannot know is
+        reported as indeterminate and is never retried on your behalf.
+      </p>
+    </div>
+
+    <div class="dk-shell">
+      <div class="dk-table-wrap">
+        <table class="dk-table">
+          <thead>
+            <tr>
+              <th scope="col">Capability</th>
+              <th scope="col">Postgres (TCP)</th>
+              <th scope="col">Supabase direct</th>
+              <th scope="col">Supabase session</th>
+              <th scope="col">Supabase transaction</th>
+              <th scope="col">Neon HTTP</th>
+              <th scope="col">Neon WebSocket</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <th scope="row">Transport</th>
+              <td><code class="dk-mono">tcp</code></td>
+              <td><code class="dk-mono">tcp</code></td>
+              <td><code class="dk-mono">tcp</code></td>
+              <td><code class="dk-mono">tcp</code></td>
+              <td><code class="dk-mono">http</code></td>
+              <td><code class="dk-mono">websocket</code></td>
+            </tr>
+            <tr>
+              <th scope="row">Parameterized query()</th>
+              <td><span class="dk-cell dk-cell-ok">supported</span></td>
+              <td><span class="dk-cell dk-cell-ok">supported</span></td>
+              <td><span class="dk-cell dk-cell-ok">supported</span></td>
+              <td><span class="dk-cell dk-cell-ok">supported</span></td>
+              <td><span class="dk-cell dk-cell-ok">supported</span></td>
+              <td><span class="dk-cell dk-cell-ok">supported</span></td>
+            </tr>
+            <tr>
+              <th scope="row">Interactive transaction()</th>
+              <td><span class="dk-cell dk-cell-ok">supported</span></td>
+              <td><span class="dk-cell dk-cell-ok">supported</span></td>
+              <td><span class="dk-cell dk-cell-ok">supported</span></td>
+              <td><span class="dk-cell dk-cell-ok">one leased connection</span></td>
+              <td><span class="dk-cell dk-cell-no">refused before dispatch</span></td>
+              <td><span class="dk-cell dk-cell-ok">short-lived pool per transaction</span></td>
+            </tr>
+            <tr>
+              <th scope="row">Atomic batch()</th>
+              <td><span class="dk-cell dk-cell-ok">supported</span></td>
+              <td><span class="dk-cell dk-cell-ok">supported</span></td>
+              <td><span class="dk-cell dk-cell-ok">supported</span></td>
+              <td><span class="dk-cell dk-cell-ok">supported</span></td>
+              <td><span class="dk-cell dk-cell-ok">one native HTTP round-trip</span></td>
+              <td><span class="dk-cell dk-cell-ok">supported</span></td>
+            </tr>
+            <tr>
+              <th scope="row">Session state (SET, LISTEN, temp objects)</th>
+              <td><span class="dk-cell dk-cell-ok">dedicated session</span></td>
+              <td><span class="dk-cell dk-cell-ok">dedicated session</span></td>
+              <td><span class="dk-cell dk-cell-ok">dedicated session</span></td>
+              <td><span class="dk-cell dk-cell-no">guarded before dispatch</span></td>
+              <td><span class="dk-cell dk-cell-no">not supported</span></td>
+              <td><span class="dk-cell dk-cell-spec">direct endpoint, dedicated session; pooled hosts: no</span></td>
+            </tr>
+            <tr>
+              <th scope="row">Verified by</th>
+              <td>fixtures and a live local PostgreSQL</td>
+              <td>fixtures and configuration validation</td>
+              <td>fixtures and configuration validation</td>
+              <td>fixtures and a live local PostgreSQL</td>
+              <td>fixtures and a live local Neon proxy</td>
+              <td>fixtures</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="dk-table-foot">
+        <p>
+          Session state lives on a dedicated session: it holds inside
+          <code class="dk-mono">transaction()</code>, which leases one
+          connection, or on a client reached through
+          <code class="dk-mono">db.raw</code>. Top-level
+          <code class="dk-mono">db.sql</code> and
+          <code class="dk-mono">db.query</code> calls may run on different
+          pooled connections, so session state does not persist between them,
+          including on a direct endpoint behind a local pool.
+        </p>
+        <p>
+          All TCP transports use unnamed protocol statements; dbSDK never
+          creates reusable named prepared statements. The HTTP transport has
+          none. Evidence vocabulary: <strong>fixtures</strong> means verified by
+          the automated test suite against fixtures or local servers, and <strong>configuration validation</strong> means the adapter proves the
+          connection string matches the declared mode before connecting. Nothing
+          is claimed as verified against a hosted provider until it has been run
+          that way.
+        </p>
+        <p>
+          For trusted server-side applications. Connection roles determine
+          access; dbSDK does not attach Supabase user identity to a SQL
+          connection.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= GUARANTEES ================= -->
+  <section class="dk-section dk-section-navy" id="guarantees">
+    <div class="dk-shell dk-head-grid dk-head-grid-navy">
+      <h2 class="dk-h2">
+        What dbSDK<br />will not do.
+      </h2>
+      <p class="dk-head-sub">
+        These are design decisions, not missing features. They hold on every
+        adapter, and they are the reason the client stays small enough to
+        reason about.
+      </p>
+    </div>
+
+    <div class="dk-shell">
+      <ul class="dk-guarantees">
+        <li>
+          <h3>No silent failover</h3>
+          <p>
+            Switching databases is your decision. The client never reroutes a
+            query to another provider, and it never silently rewrites the
+            endpoint you declared.
+          </p>
+        </li>
+        <li>
+          <h3>No automatic replay of writes</h3>
+          <p>
+            If a connection drops after a write is sent, the outcome is reported
+            as indeterminate. Nothing is retried on your behalf; your
+            application decides what happened.
+          </p>
+        </li>
+        <li>
+          <h3>No endpoint guessing</h3>
+          <p>
+            Connection strings are used exactly as given. When a string
+            contradicts the declared connection mode, the adapter fails loudly
+            before connecting.
+          </p>
+        </li>
+        <li>
+          <h3>No schema tooling in the current version</h3>
+          <p>
+            Migrations, branching, provisioning, realtime, storage and auth are
+            separate concerns. dbSDK does one job: typed, parameterized SQL over
+            real Postgres drivers.
+          </p>
+        </li>
+        <li>
+          <h3>No browser sessions</h3>
+          <p>
+            dbSDK is for trusted server-side applications. End-user identity is
+            not attached to a SQL connection automatically; connection roles
+            determine access.
+          </p>
+        </li>
+      </ul>
+    </div>
+  </section>
+
+  <!-- ================= AGENTS & TESTING ================= -->
+  <section class="dk-section" id="agents">
+    <div class="dk-shell dk-head-grid">
+      <h2 class="dk-h2">
+        Built to be read twice.<br />By you, and by your agent.
+      </h2>
+      <p class="dk-head-sub">
+        Every page of this site is also available as Markdown and JSON, and the
+        SDK ships a fixture adapter so you can build against the client before
+        a single credential exists.
+      </p>
+    </div>
+
+    <div class="dk-shell dk-agents-grid">
+      <ul class="dk-agent-list">
+        <li>
+          <a class="dk-agent-link" href="/llms.txt"><code>llms.txt</code></a>
+          <p>Curated index for coding agents, with <code>llms-full.txt</code> as the full corpus.</p>
+        </li>
+        <li>
+          <a class="dk-agent-link" href="/getting-started.md"><code>any page + .md</code></a>
+          <p>Raw Markdown for every page. Structured data, a sitemap and robots come standard.</p>
+        </li>
+        <li>
+          <a class="dk-agent-link" href="/openapi.json"><code>openapi.json</code></a>
+          <p>A machine-readable description of the site's JSON API for function-calling frameworks.</p>
+        </li>
+        <li>
+          <p class="dk-agent-plain"><code>local search</code></p>
+          <p>Client-side search with no API keys and no hosted service.</p>
+        </li>
+      </ul>
+
+      <div class="dk-fixture">
+        <div class="dk-fixture-panel">
+          <div class="dk-code-bar">
+            <span class="dk-code-file">fixtures.ts</span>
+          </div>
+          <pre class="dk-fixture-pre">{`import { createFixtureDatabase } from "dbsdk/testing";
+
+const db = createFixtureDatabase({
+  fixtures: [
+    {
+      match: "select id, email from users where id = $1",
+      rows: [{ id: "usr_8f2c41", email: "ada@example.com" }],
+      rowCount: 1,
+      command: "SELECT",
+    },
+  ],
+});
+
+const { rows } = await db.sql\`
+  select id, email from users where id = \${userId}
+\`;`}</pre>
+        </div>
+        <p class="dk-fixture-note">
+          Scripted fixtures verify what the client does with results, errors and
+          capabilities. They are deliberately not an in-memory SQL engine, so
+          they cannot silently pretend transaction semantics are correct.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= FOOTER ================= -->
+  <footer class="dk-footer" slot="footer">
+    <div class="dk-shell dk-footer-row">
+      <span class="dk-footer-brand">db<span>SDK</span></span>
+      <nav class="dk-footer-links" aria-label="Footer">
+        <a href="/getting-started">Docs</a>
+        <a href="/capabilities">Capabilities</a>
+        <a href="https://github.com/pkyanam/dbSDK" rel="noopener">GitHub</a>
+      </nav>
+      <span class="dk-footer-note">PostgreSQL first. Supabase and Neon are the launch adapters.</span>
+    </div>
+  </footer>
+</PageLayout>
+
+<script type="application/json" id="dk-tabs-data" set:html={tabsJson} />
+
+<script>
+  const tabsEl = document.getElementById("dk-tabs-data");
+  const panel = document.getElementById("dk-panel");
+  const codeEl = document.getElementById("dk-code") as HTMLElement;
+  const fileEl = document.getElementById("dk-file") as HTMLElement;
+  const capsEl = document.getElementById("dk-caps") as HTMLElement;
+  const noteEl = document.getElementById("dk-note") as HTMLElement;
+  const evidenceEl = document.getElementById("dk-evidence") as HTMLElement;
+  const sharedEl = document.getElementById("dk-shared") as HTMLElement;
+  const copyBtn = document.getElementById("dk-copy") as HTMLButtonElement;
+  const tabButtons = Array.from(document.querySelectorAll<HTMLButtonElement>(".dk-tab"));
+
+  type Cap = { label: string; state: "ok" | "warn" | "no"; note: string };
+  type Tab = {
+    id: string;
+    name: string;
+    sub: string;
+    file: string;
+    html: string;
+    caps: Cap[];
+    note: string;
+    evidence: string;
+  };
+
+  const tabs: Tab[] = tabsEl ? (JSON.parse(tabsEl.textContent ?? "[]") as Tab[]) : [];
+  const sharedQuery = sharedEl ? sharedEl.textContent ?? "" : "";
+  let activeId = tabButtons.find((b) => b.getAttribute("aria-selected") === "true")?.dataset.tab;
+
+  function render(id?: string) {
+    const tab = tabs.find((t) => t.id === id);
+    if (!tab || !panel) return;
+    activeId = tab.id;
+    codeEl.innerHTML = tab.html;
+    fileEl.textContent = tab.file;
+    noteEl.textContent = tab.note;
+    evidenceEl.textContent = tab.evidence;
+    panel.setAttribute("aria-labelledby", `dk-tab-${tab.id}`);
+    capsEl.innerHTML = tab.caps
+      .map(
+        (cap) =>
+          `<li class="dk-cap dk-cap-${cap.state}"><span class="dk-cap-dot" aria-hidden="true"></span><div><p class="dk-cap-label">${cap.label}</p><p class="dk-cap-note">${cap.note}</p></div></li>`
+      )
+      .join("");
+    tabButtons.forEach((btn) => {
+      const selected = btn.dataset.tab === tab.id;
+      btn.setAttribute("aria-selected", selected ? "true" : "false");
+      btn.tabIndex = selected ? 0 : -1;
+    });
+  }
+
+  function onKeydown(event: KeyboardEvent) {
+    const keys = ["ArrowDown", "ArrowRight", "ArrowUp", "ArrowLeft", "Home", "End"];
+    if (!keys.includes(event.key)) return;
+    event.preventDefault();
+    const current = tabButtons.findIndex((b) => b.dataset.tab === activeId);
+    let next = current;
+    if (event.key === "ArrowDown" || event.key === "ArrowRight") next = (current + 1) % tabButtons.length;
+    if (event.key === "ArrowUp" || event.key === "ArrowLeft") next = (current - 1 + tabButtons.length) % tabButtons.length;
+    if (event.key === "Home") next = 0;
+    if (event.key === "End") next = tabButtons.length - 1;
+    const target = tabButtons[next];
+    if (target) {
+      render(target.dataset.tab);
+      target.focus();
+    }
+  }
+
+  tabButtons.forEach((btn) => {
+    btn.addEventListener("click", () => render(btn.dataset.tab));
+    btn.addEventListener("keydown", onKeydown);
+  });
+
+  if (copyBtn) {
+    copyBtn.addEventListener("click", async () => {
+      const tab = tabs.find((t) => t.id === activeId);
+      if (!tab) return;
+      const text = tab.html.replace(/<[^>]+>/g, "") + "\n\n" + sharedQuery;
+      try {
+        await navigator.clipboard.writeText(text);
+      } catch {
+        const area = document.createElement("textarea");
+        area.value = text;
+        document.body.appendChild(area);
+        area.select();
+        document.execCommand("copy");
+        area.remove();
+      }
+      const label = copyBtn.querySelector(".dk-copy-label");
+      if (label) {
+        label.textContent = "Copied";
+        window.setTimeout(() => {
+          label.textContent = "Copy";
+        }, 1600);
+      }
+    });
+  }
+
+  render(activeId);
+</script>
+
+<style is:global>
+  /* ---------- shared ---------- */
+  .dk-shell {
+    max-width: 76rem;
+    margin-inline: auto;
+    padding-inline: 1.5rem;
+  }
+  .dk-h2 {
+    font-family: var(--blume-font-body);
+    font-weight: 600;
+    font-size: clamp(1.9rem, 4vw, 2.7rem);
+    line-height: 1.08;
+    letter-spacing: -0.02em;
+    margin: 0;
+    color: var(--dbsdk-navy);
+  }
+  .dk-head-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 5fr) minmax(0, 6fr);
+    gap: 2rem 4rem;
+    align-items: end;
+    margin-bottom: 3.5rem;
+  }
+  .dk-head-sub {
+    max-width: 34rem;
+    color: var(--dbsdk-ink-soft);
+    line-height: 1.65;
+    margin: 0;
+    justify-self: end;
+  }
+
+  /* ---------- hero: navy block, cream type, real generated art ---------- */
+  .dk-hero {
+    background: var(--dbsdk-navy);
+    color: var(--dbsdk-cream);
+    padding-top: 6.5rem;
+    overflow: hidden;
+    position: relative;
+  }
+  .dk-hero-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 7fr) minmax(0, 5fr);
+    gap: 3rem 4rem;
+    align-items: start;
+    padding-bottom: 1rem;
+  }
+  .dk-h1 {
+    margin: 0;
+    font-family: var(--blume-font-body);
+    font-weight: 600;
+    font-size: clamp(2.6rem, 6vw, 4.4rem);
+    line-height: 1.0;
+    letter-spacing: -0.03em;
+    color: var(--dbsdk-cream);
+  }
+  .dk-h1-line {
+    display: block;
+  }
+  .dk-h1-accent {
+    color: var(--dbsdk-blue);
+  }
+  .dk-lede {
+    max-width: 33rem;
+    margin-top: 1.5rem;
+    line-height: 1.68;
+    color: rgba(253, 240, 213, 0.85);
+    font-size: 1.08rem;
+  }
+  .dk-cta-row {
+    display: flex;
+    gap: 0.8rem;
+    flex-wrap: wrap;
+    margin-top: 2rem;
+  }
+  .dk-cta {
+    display: inline-block;
+    font-family: var(--blume-font-body);
+    font-size: 1rem;
+    font-weight: 600;
+    text-decoration: none;
+    background: var(--dbsdk-red);
+    color: var(--dbsdk-cream);
+    padding: 0.78rem 1.5rem;
+    border-radius: var(--blume-radius);
+    transition: background-color 0.15s ease;
+  }
+  .dk-cta:hover,
+  .dk-cta:focus-visible {
+    background: var(--dbsdk-red-deep);
+    color: var(--dbsdk-cream);
+  }
+  .dk-cta-ghost {
+    background: transparent;
+    color: var(--dbsdk-cream);
+    border: 1px solid rgba(253, 240, 213, 0.5);
+  }
+  .dk-cta-ghost:hover,
+  .dk-cta-ghost:focus-visible {
+    background: rgba(253, 240, 213, 0.12);
+    color: var(--dbsdk-cream);
+  }
+  .dk-facts {
+    margin: 2.4rem 0 0;
+    font-size: 0.95rem;
+    line-height: 1.6;
+    color: var(--dbsdk-blue);
+  }
+  .dk-facts span {
+    margin-inline: 0.35rem;
+  }
+
+  /* ---------- hero art plate ---------- */
+  .dk-plate {
+    margin: 2.75rem 0 0;
+    border: 1px solid rgba(102, 155, 188, 0.45);
+    border-radius: var(--blume-radius);
+    background: var(--dbsdk-cream);
+    overflow: hidden;
+  }
+  .dk-plate img,
+  .dk-plate picture {
+    display: block;
+    width: 100%;
+    height: auto;
+  }
+  .dk-plate img {
+    aspect-ratio: 4 / 3.2;
+    object-fit: cover;
+    /* Focal crop toward the navy rows and the single red node. */
+    object-position: 72% 42%;
+  }
+
+  /* ---------- giant wordmark, bottom-clipped ---------- */
+  .dk-masthead {
+    margin: 1.5rem 0 0;
+    line-height: 0.78;
+    user-select: none;
+    white-space: nowrap;
+    transform: translateY(0.14em);
+    font-weight: 700;
+    letter-spacing: -0.045em;
+    font-size: clamp(4.5rem, 15vw, 12.5rem);
+  }
+  .dk-masthead-db {
+    color: var(--dbsdk-cream);
+  }
+  .dk-masthead-sdk {
+    color: var(--dbsdk-blue);
+  }
+
+  /* ---------- sections ---------- */
+  .dk-section {
+    padding-block: 5.5rem;
+  }
+  .dk-section-alt {
+    background: var(--dbsdk-cream-deep);
+  }
+  .dk-section-navy {
+    background: var(--dbsdk-navy);
+  }
+  .dk-section-navy .dk-h2 {
+    color: var(--dbsdk-cream);
+  }
+  .dk-section-navy .dk-head-sub {
+    color: #a9c1d1;
+  }
+
+  /* ---------- switcher ---------- */
+  .dk-switcher {
+    display: grid;
+    grid-template-columns: minmax(0, 3fr) minmax(0, 9fr);
+    gap: 2.5rem;
+    align-items: start;
+  }
+  .dk-tabs {
+    display: flex;
+    flex-direction: column;
+    border-top: 1px solid var(--dbsdk-border);
+  }
+  .dk-tab {
+    appearance: none;
+    background: transparent;
+    border: 0;
+    border-bottom: 1px solid var(--dbsdk-border);
+    border-left: 3px solid transparent;
+    padding: 0.85rem 0.9rem 0.85rem 0.75rem;
+    margin-left: -0.75rem;
+    text-align: left;
+    cursor: pointer;
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+    color: inherit;
+    font-family: var(--blume-font-body);
+    transition: background-color 0.15s ease, border-color 0.15s ease;
+  }
+  .dk-tab:hover {
+    background: var(--dbsdk-cream-deep);
+  }
+  .dk-tab:focus-visible {
+    outline: 2px solid var(--dbsdk-red);
+    outline-offset: -2px;
+  }
+  .dk-tab-name {
+    font-weight: 600;
+    font-size: 1rem;
+    color: var(--dbsdk-navy);
+  }
+  .dk-tab-sub {
+    font-size: 0.82rem;
+    color: var(--dbsdk-ink-soft);
+  }
+  .dk-tab[aria-selected="true"] {
+    background: var(--dbsdk-navy);
+    border-left-color: var(--dbsdk-red);
+  }
+  .dk-tab[aria-selected="true"] .dk-tab-name {
+    color: var(--dbsdk-cream);
+  }
+  .dk-tab[aria-selected="true"] .dk-tab-sub {
+    color: var(--dbsdk-blue);
+  }
+  .dk-rail-note {
+    margin-top: 1.6rem;
+    border-left: 3px solid var(--dbsdk-red);
+    padding-left: 1rem;
+  }
+  .dk-note {
+    margin: 0;
+    font-size: 0.95rem;
+    line-height: 1.6;
+    color: var(--dbsdk-navy);
+  }
+  .dk-evidence {
+    margin: 0.7rem 0 0;
+    font-size: 0.82rem;
+    line-height: 1.55;
+    color: var(--dbsdk-ink-soft);
+  }
+
+  .dk-stage {
+    min-width: 0;
+    border: 1px solid var(--dbsdk-border);
+    border-radius: var(--blume-radius);
+    background: var(--blume-background);
+    overflow: hidden;
+  }
+  .dk-stage:focus-visible {
+    outline: 2px solid var(--dbsdk-red);
+    outline-offset: 2px;
+  }
+  .dk-stage-top {
+    display: grid;
+    grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+  }
+
+  .dk-code {
+    background: var(--dbsdk-navy-deep);
+    min-width: 0;
+  }
+  .dk-code-bar {
+    display: flex;
+    align-items: center;
+    gap: 0.8rem;
+    padding: 0.65rem 1rem;
+    border-bottom: 1px solid rgba(253, 240, 213, 0.14);
+    background: rgba(0, 26, 43, 0.55);
+  }
+  .dk-code-file {
+    margin-right: auto;
+    font-family: var(--blume-font-mono, ui-monospace, monospace);
+    font-size: 0.78rem;
+    color: rgba(253, 240, 213, 0.65);
+  }
+  .dk-copy {
+    appearance: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    background: transparent;
+    border: 1px solid rgba(253, 240, 213, 0.35);
+    border-radius: var(--blume-radius);
+    color: var(--dbsdk-cream);
+    font-family: var(--blume-font-body);
+    font-size: 0.78rem;
+    font-weight: 600;
+    padding: 0.3rem 0.6rem;
+    cursor: pointer;
+    transition: background-color 0.15s ease, border-color 0.15s ease;
+  }
+  .dk-copy:hover,
+  .dk-copy:focus-visible {
+    background: rgba(253, 240, 213, 0.12);
+    border-color: rgba(253, 240, 213, 0.6);
+  }
+  .dk-code-pre {
+    margin: 0;
+    padding: 1.25rem 1.25rem 1.5rem;
+    font-family: var(--blume-font-mono, ui-monospace, monospace);
+    font-size: 0.84rem;
+    line-height: 1.65;
+    color: var(--dbsdk-cream);
+    overflow-x: auto;
+    white-space: pre;
+  }
+  .tk-k { color: #669bbc; }
+  .tk-s { color: #e8c47c; }
+  .tk-c { color: #7d99ab; }
+  .tk-f { color: #9fc3da; }
+  .tk-v { color: #fdf0d5; }
+  .tk-p { color: #a9c1d1; }
+
+  .dk-caps {
+    padding: 1.3rem 1.4rem;
+    border-left: 1px solid var(--dbsdk-border);
+    min-width: 0;
+  }
+  .dk-caps-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+  }
+  .dk-cap {
+    display: grid;
+    grid-template-columns: 0.65rem 1fr;
+    column-gap: 0.75rem;
+    padding: 0.7rem 0;
+    border-bottom: 1px dashed var(--dbsdk-border);
+  }
+  .dk-cap:last-child {
+    border-bottom: 0;
+  }
+  .dk-cap-dot {
+    width: 0.55rem;
+    height: 0.55rem;
+    border-radius: 999px;
+    margin-top: 0.4rem;
+    background: var(--dbsdk-navy);
+  }
+  .dk-cap-warn .dk-cap-dot {
+    background: var(--dbsdk-red);
+  }
+  .dk-cap-no .dk-cap-dot {
+    background: var(--dbsdk-red-deep);
+    box-shadow: inset 0 0 0 1px var(--dbsdk-red-deep);
+  }
+  .dk-cap-label {
+    margin: 0;
+    font-weight: 600;
+    font-size: 0.88rem;
+    color: var(--dbsdk-navy);
+  }
+  .dk-cap-note {
+    margin: 0.15rem 0 0;
+    font-size: 0.8rem;
+    line-height: 1.5;
+    color: var(--dbsdk-ink-soft);
+  }
+
+  .dk-shared {
+    border-top: 1px solid var(--dbsdk-border);
+    background: var(--dbsdk-cream-deep);
+  }
+  .dk-shared-head {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem 1.2rem;
+    align-items: baseline;
+    padding: 0.7rem 1.25rem;
+    border-bottom: 1px solid var(--dbsdk-border);
+  }
+  .dk-shared-label {
+    font-weight: 600;
+    font-size: 0.85rem;
+    color: var(--dbsdk-red);
+  }
+  .dk-shared-note {
+    font-size: 0.8rem;
+    color: var(--dbsdk-ink-soft);
+  }
+  .dk-shared-body {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+  .dk-shared-code {
+    margin: 0;
+    padding: 1.2rem 1.25rem;
+    font-family: var(--blume-font-mono, ui-monospace, monospace);
+    font-size: 0.84rem;
+    line-height: 1.65;
+    color: var(--dbsdk-navy);
+    overflow-x: auto;
+    white-space: pre;
+  }
+  .dk-shared-code .tk-k { color: var(--dbsdk-red); }
+  .dk-shared-code .tk-s { color: var(--dbsdk-red-deep); }
+  .dk-shared-code .tk-c { color: var(--dbsdk-ink-soft); }
+  .dk-shared-code .tk-f { color: var(--dbsdk-navy); font-weight: 600; }
+  .dk-shared-code .tk-v { color: var(--dbsdk-navy); }
+  .dk-shared-code .tk-p { color: var(--dbsdk-ink-soft); }
+
+  .dk-result {
+    border-left: 1px solid var(--dbsdk-border);
+    background: var(--dbsdk-navy-deep);
+    padding: 1.1rem 1.25rem 1.3rem;
+    min-width: 0;
+  }
+  .dk-result-label {
+    margin: 0 0 0.7rem;
+    font-family: var(--blume-font-mono, ui-monospace, monospace);
+    font-size: 0.75rem;
+    color: var(--dbsdk-blue);
+  }
+  .dk-result-pre {
+    margin: 0;
+    font-family: var(--blume-font-mono, ui-monospace, monospace);
+    font-size: 0.8rem;
+    line-height: 1.6;
+    color: var(--dbsdk-cream);
+    overflow-x: auto;
+    white-space: pre;
+  }
+  .dk-result-note {
+    margin: 0.9rem 0 0;
+    font-size: 0.8rem;
+    line-height: 1.55;
+    color: rgba(253, 240, 213, 0.72);
+  }
+
+  /* ---------- capabilities table ---------- */
+  .dk-table-wrap {
+    border: 1px solid var(--dbsdk-border);
+    border-radius: var(--blume-radius);
+    overflow-x: auto;
+    background: var(--dbsdk-cream);
+  }
+  .dk-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.88rem;
+    min-width: 58rem;
+  }
+  .dk-table thead th {
+    font-size: 0.85rem;
+    font-weight: 600;
+    text-align: left;
+    color: var(--dbsdk-cream);
+    background: var(--dbsdk-navy);
+    padding: 0.85rem 1.1rem;
+    border-bottom: 1px solid var(--dbsdk-border);
+    white-space: nowrap;
+  }
+  .dk-table tbody th {
+    text-align: left;
+    font-weight: 600;
+    padding: 0.9rem 1.1rem;
+    border-bottom: 1px solid var(--dbsdk-border);
+    color: var(--dbsdk-navy);
+    background: var(--dbsdk-cream);
+    position: sticky;
+    left: 0;
+    min-width: 13rem;
+  }
+  .dk-table tbody td {
+    padding: 0.9rem 1.1rem;
+    border-bottom: 1px solid var(--dbsdk-border);
+    color: var(--dbsdk-ink-soft);
+    vertical-align: top;
+    line-height: 1.5;
+  }
+  .dk-table tbody tr:last-child th,
+  .dk-table tbody tr:last-child td {
+    border-bottom: 0;
+  }
+  .dk-mono {
+    font-family: var(--blume-font-mono, ui-monospace, monospace);
+    font-size: 0.8rem;
+    color: var(--dbsdk-navy);
+  }
+  .dk-cell {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 0.45rem;
+  }
+  .dk-cell::before {
+    content: "";
+    width: 0.5rem;
+    height: 0.5rem;
+    border-radius: 999px;
+    flex: none;
+    transform: translateY(0.05em);
+  }
+  .dk-cell-ok::before {
+    background: var(--dbsdk-navy);
+  }
+  .dk-cell-no::before {
+    background: var(--dbsdk-red);
+  }
+  .dk-cell-spec::before {
+    background: transparent;
+    box-shadow: inset 0 0 0 1.5px var(--dbsdk-ink-soft);
+  }
+  .dk-cell-ok {
+    color: var(--dbsdk-navy);
+    font-weight: 500;
+  }
+  .dk-cell-no {
+    color: var(--dbsdk-red);
+    font-weight: 500;
+  }
+  .dk-cell-spec {
+    color: var(--dbsdk-ink-soft);
+  }
+  .dk-table-foot {
+    margin-top: 1.3rem;
+    max-width: 46rem;
+    display: grid;
+    gap: 0.7rem;
+  }
+  .dk-table-foot p {
+    margin: 0;
+    font-size: 0.88rem;
+    line-height: 1.65;
+    color: var(--dbsdk-ink-soft);
+  }
+  .dk-table-foot strong {
+    color: var(--dbsdk-navy);
+    font-weight: 600;
+  }
+
+  /* ---------- guarantees ---------- */
+  .dk-guarantees {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: grid;
+    grid-template-columns: repeat(6, 1fr);
+    gap: 2.5rem 3rem;
+  }
+  .dk-guarantees li {
+    grid-column: span 2;
+    border-left: 3px solid var(--dbsdk-red);
+    padding-left: 1.1rem;
+  }
+  .dk-guarantees li:nth-child(4) {
+    grid-column: 2 / span 2;
+  }
+  .dk-guarantees li:nth-child(5) {
+    grid-column: 4 / span 2;
+  }
+  .dk-guarantees h3 {
+    margin: 0 0 0.5rem;
+    font-size: 1.15rem;
+    font-weight: 600;
+    color: var(--dbsdk-cream);
+  }
+  .dk-guarantees p {
+    margin: 0;
+    color: #a9c1d1;
+    line-height: 1.65;
+    font-size: 0.94rem;
+  }
+
+  /* ---------- agents & testing ---------- */
+  .dk-agents-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 5fr) minmax(0, 6fr);
+    gap: 3rem 4rem;
+    align-items: start;
+  }
+  .dk-agent-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+  }
+  .dk-agent-list li {
+    padding: 1.1rem 0;
+    border-top: 1px solid var(--dbsdk-border);
+  }
+  .dk-agent-list li:last-child {
+    border-bottom: 1px solid var(--dbsdk-border);
+  }
+  .dk-agent-link {
+    text-decoration: none;
+  }
+  .dk-agent-link code,
+  .dk-agent-plain code {
+    font-family: var(--blume-font-mono, ui-monospace, monospace);
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: var(--dbsdk-navy);
+    border-bottom: 2px solid var(--dbsdk-red);
+    padding-bottom: 0.1rem;
+  }
+  .dk-agent-link:hover code {
+    color: var(--dbsdk-red);
+  }
+  .dk-agent-plain {
+    margin: 0;
+  }
+  .dk-agent-list p {
+    margin: 0.5rem 0 0;
+    font-size: 0.92rem;
+    line-height: 1.6;
+    color: var(--dbsdk-ink-soft);
+  }
+  .dk-agent-list p code {
+    font-family: var(--blume-font-mono, ui-monospace, monospace);
+    font-size: 0.85em;
+    color: var(--dbsdk-navy);
+  }
+  .dk-fixture {
+    min-width: 0;
+  }
+  .dk-fixture-panel {
+    border-radius: var(--blume-radius);
+    overflow: hidden;
+    background: var(--dbsdk-navy-deep);
+    border: 1px solid var(--dbsdk-border);
+  }
+  .dk-fixture-pre {
+    margin: 0;
+    padding: 1.25rem;
+    font-family: var(--blume-font-mono, ui-monospace, monospace);
+    font-size: 0.82rem;
+    line-height: 1.65;
+    color: var(--dbsdk-cream);
+    overflow-x: auto;
+    white-space: pre;
+  }
+  .dk-fixture-note {
+    margin: 1rem 0 0;
+    font-size: 0.9rem;
+    line-height: 1.65;
+    color: var(--dbsdk-ink-soft);
+    max-width: 34rem;
+  }
+
+  /* ---------- footer ---------- */
+  .dk-footer {
+    border-top: 1px solid rgba(102, 155, 188, 0.35);
+    background: var(--dbsdk-navy-deep);
+    color: var(--dbsdk-cream);
+  }
+  .dk-footer-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1rem 2rem;
+    align-items: center;
+    justify-content: space-between;
+    padding-block: 1.5rem;
+  }
+  .dk-footer-brand {
+    font-weight: 700;
+    font-size: 1.05rem;
+  }
+  .dk-footer-brand span {
+    color: var(--dbsdk-blue);
+  }
+  .dk-footer-links {
+    display: flex;
+    gap: 1.5rem;
+  }
+  .dk-footer-links a {
+    color: var(--dbsdk-cream);
+    text-decoration: none;
+    font-size: 0.9rem;
+  }
+  .dk-footer-links a:hover,
+  .dk-footer-links a:focus-visible {
+    color: var(--dbsdk-blue);
+  }
+  .dk-footer-note {
+    font-size: 0.85rem;
+    color: var(--dbsdk-blue);
+  }
+
+  /* ---------- motion & focus ---------- */
+  @media (prefers-reduced-motion: reduce) {
+    .dk-cta,
+    .dk-tab,
+    .dk-copy {
+      transition: none;
+    }
+  }
+  .dk-hero :focus-visible,
+  .dk-footer :focus-visible,
+  .dk-section-navy :focus-visible {
+    outline: 2px solid var(--dbsdk-blue);
+    outline-offset: 2px;
+  }
+
+  /* ---------- mobile ---------- */
+  @media (max-width: 60rem) {
+    .dk-hero {
+      padding-top: 5.5rem;
+    }
+    .dk-hero-grid,
+    .dk-head-grid,
+    .dk-switcher,
+    .dk-stage-top,
+    .dk-shared-body,
+    .dk-agents-grid {
+      grid-template-columns: 1fr;
+    }
+    .dk-head-sub,
+    .dk-head-grid-navy .dk-head-sub {
+      justify-self: start;
+    }
+    .dk-head-grid {
+      gap: 1.2rem;
+      margin-bottom: 2.5rem;
+    }
+    .dk-plate {
+      margin-top: 0.5rem;
+    }
+    .dk-section {
+      padding-block: 4rem;
+    }
+    .dk-tabs {
+      flex-direction: row;
+      flex-wrap: wrap;
+      border-top: 0;
+    }
+    .dk-tab {
+      flex: 1 1 45%;
+      border-bottom: 1px solid var(--dbsdk-border);
+      border-left: 0;
+      border-top: 3px solid transparent;
+      margin-left: 0;
+    }
+    .dk-tab[aria-selected="true"] {
+      border-left-color: transparent;
+      border-top-color: var(--dbsdk-red);
+    }
+    .dk-caps {
+      border-left: 0;
+      border-top: 1px solid var(--dbsdk-border);
+    }
+    .dk-guarantees {
+      grid-template-columns: 1fr;
+      gap: 2rem;
+    }
+    .dk-guarantees li,
+    .dk-guarantees li:nth-child(4),
+    .dk-guarantees li:nth-child(5) {
+      grid-column: auto;
+    }
+    .dk-masthead {
+      font-size: clamp(4rem, 19vw, 8rem);
+    }
+  }
+
+  @media (max-width: 26rem) {
+    .dk-tab {
+      flex: 1 1 100%;
+    }
+  }
+</style>

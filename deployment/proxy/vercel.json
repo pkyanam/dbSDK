@@ -1,0 +1,12 @@
+{
+  "rewrites": [
+    {
+      "source": "/:path*",
+      "destination": "https://dbsdk.preetham-981.workers.dev/:path*"
+    },
+    {
+      "source": "/",
+      "destination": "https://dbsdk.preetham-981.workers.dev/"
+    }
+  ]
+}

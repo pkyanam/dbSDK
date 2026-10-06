@@ -1,0 +1,150 @@
+---
+title: Neon adapter
+description: Neon over HTTP, WebSocket, or TCP transaction transports, with capabilities that differ by transport and are always explicit.
+sidebar:
+  order: 8
+---
+
+`dbsdk/neon` connects to Neon using the official
+`@neondatabase/serverless` driver. Neon's transports have genuinely
+different capabilities, so this adapter makes the transport a first-class
+option instead of hiding the difference.
+
+```ts
+import { createDatabase } from "dbsdk";
+import { neon } from "dbsdk/neon";
+
+const db = createDatabase({
+  adapter: neon({
+    connectionString: process.env.DATABASE_URL!,
+    transport: "http", // the default
+  }),
+});
+```
+
+Install the driver alongside the package (optional peer dependency; npm
+installs optional peers automatically, but pnpm does not - add it
+explicitly):
+
+```bash
+npm install @neondatabase/serverless
+# pnpm:
+pnpm add @neondatabase/serverless
+# plus pg if you use transactionTransport: "postgres"
+```
+
+## Transports
+
+| Option | What it is | Interactive transactions |
+| --- | --- | --- |
+| `transport: "http"` (default) | One HTTP request per query, using the driver's `neon()` function | Refused before dispatch |
+| `transport: "websocket"` | The driver's node-postgres-compatible `Pool` over WebSockets | Supported |
+| `transactionTransport: "postgres"` | HTTP for queries; a `pg` pool against the direct endpoint for transactions | Supported |
+
+### HTTP (default)
+
+The fast path for serverless: no persistent socket, low cold-start cost,
+and a native single-round-trip atomic batch. Limits that matter:
+
+- `db.transaction(fn)` throws a `CAPABILITY` error before dispatch. HTTP
+  cannot carry a multi-round-trip session.
+- No session state: `SET`, temp objects, and `LISTEN` do not persist.
+- Use `db.batch` for atomic multi-statement writes; it is one HTTP round
+  trip and works well.
+
+```ts
+const results = await db.batch([
+  { text: "insert into events (kind) values ($1)", params: ["signup"] },
+  { text: "insert into audit (message) values ($1)", params: ["user created"] },
+]);
+```
+
+### WebSocket
+
+Set `transport: "websocket"` to get the driver's `Pool`: full sessions,
+interactive transactions, and everything the wire protocol supports,
+without a TCP listener. Nearest to a normal Postgres client, safe inside a
+single serverless request.
+
+```ts
+neon({ connectionString, transport: "websocket" });
+```
+
+### TCP transactions with HTTP queries
+
+Set `transactionTransport: "postgres"` (plus `postgresConnectionString`
+pointing at Neon's direct, non-pooled endpoint) to keep HTTP for queries
+and run interactive transactions over TCP with `pg`:
+
+```ts
+neon({
+  connectionString: process.env.NEON_POOLED_URL!,
+  transport: "http",
+  transactionTransport: "postgres",
+  postgresConnectionString: process.env.NEON_DIRECT_URL!,
+})
+```
+
+`transactionTransport: "none"` (the default) means `transaction()` refuses
+before dispatch.
+
+## Options
+
+```ts
+type NeonAdapterOptions = {
+  connectionString: string;                     // pooled or direct endpoint
+  transport?: "http" | "websocket";             // default "http"
+  transactionTransport?: "none" | "postgres" | "websocket"; // default "none"
+  postgresConnectionString?: string;            // required for transactionTransport "postgres"
+  max?: number;                                 // pool size for TCP/WebSocket transports, default 10
+  ssl?: boolean | { rejectUnauthorized: boolean }; // for the "postgres" transaction transport
+  statementTimeout?: number;                    // ms, TCP/WebSocket transports
+  neonOptions?: Record<string, unknown>;        // forwarded to the driver, e.g. { authToken }
+};
+```
+
+The adapter detects pooled hostnames (containing `-pooler`) only to report
+session-state capability honestly; it never rewrites your connection
+string.
+
+## Capabilities and evidence
+
+Runtime evidence flags for this adapter are `docs` for every mode: the
+transport facts come from Neon's own documentation. The HTTP-transport
+behavior was additionally verified against the real Neon HTTP protocol
+through a local proxy (a one-shot parameterized query, a native atomic
+batch with a real constraint rollback, and the interactive-transaction
+refusal). WebSocket and TCP transaction transports are covered by fixture
+tests only. No hosted Neon project has been queried by this project; see
+[Capabilities](/docs/capabilities) for the evidence vocabulary.
+
+| Capability | http | websocket | http + postgres tx |
+| --- | --- | --- | --- |
+| `interactiveTransactions` | `false`, refused before dispatch | `true` | `true` |
+| `atomicBatch` | `true`, native single round trip | `true` | `true` |
+| `sessionState` | `false` | `false` on pooled hosts, `true` on direct | same as websocket |
+| `transport` | `http` | `websocket` | `http` for queries |
+
+## Edge runtimes
+
+The HTTP transport is the only one suitable for edge-style runtimes, and it
+is the reason this adapter exists in its current shape. WebSocket and TCP
+transports need the runtimes those drivers support. The capabilities table
+states what was tested where; nothing is claimed for runtimes that were not
+exercised.
+
+Cloudflare Workers, precisely stated: the core client, the `dbsdk/testing`
+fixture adapter, and the Neon HTTP adapter wiring were verified in a local
+Workers runtime (workerd) without `nodejs_compat`, using the adapter's
+`neonFactory` injection seam in place of the real HTTP driver. That proves
+the code runs in the runtime; it does not prove a live fetch to Neon from a
+Worker, which needs a deployed Worker and credentials. The TCP and
+WebSocket transports have not been edge-tested and require Node-style
+runtimes.
+
+## Escape hatch
+
+`db.raw` is `{ sql, transport, transactionTransport }` for HTTP, or
+`{ pool: ... }` for WebSocket. The `sql` object is the driver's own query
+function; using it directly leaves the normalized envelope and error
+handling.

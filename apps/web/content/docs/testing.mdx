@@ -1,0 +1,101 @@
+---
+title: Testing
+description: The fixture adapter for tests with zero credentials, and when to test against a real database instead.
+sidebar:
+  order: 9
+---
+
+`dbsdk/testing` provides a scripted adapter for unit tests. It is not an
+in-memory SQL engine and cannot prove transaction or SQL correctness. What
+it does prove: what your code sends, and what your code does with the
+envelope and the errors.
+
+## Fixture adapter
+
+Build the adapter and the client in two steps, so tests can also inspect
+what was recorded:
+
+```ts
+import { createDatabase } from "dbsdk";
+import { createFixtureAdapter } from "dbsdk/testing";
+
+const adapter = createFixtureAdapter({
+  fixtures: [
+    {
+      match: "select id, email from users where id = $1",
+      params: [42],
+      rows: [{ id: 42, email: "ada@example.com" }],
+      rowCount: 1,
+      command: "SELECT",
+    },
+    {
+      match: /insert into users/,
+      rows: [{ id: 43 }],
+      rowCount: 1,
+      command: "INSERT",
+    },
+    {
+      match: /update banned set/,
+      error: { code: "42501", message: "permission denied" }, // thrown as-is, then normalized
+    },
+  ],
+});
+
+const db = createDatabase({ adapter });
+const { rows } = await db.sql`select id, email from users where id = ${42}`;
+rows[0]?.email; // "ada@example.com"
+```
+
+`createFixtureDatabase(options)` is a convenience that does both steps and
+returns the client directly, for when you only need the query surface.
+
+How matching works:
+
+- A string `match` is compared against the statement text with whitespace
+  normalized. A RegExp `match` is tested against the normalized text.
+- When `params` is present, the query's parameters must be deeply equal.
+- Fixtures are single-use by default; pass `repeat: true` to allow
+  re-matching.
+- A query that matches nothing throws `DbError` with code `UNKNOWN` when
+  `requireMatch` is on (the default), so silent test drift fails loudly.
+
+Assertions run against the record of what was sent:
+
+```ts
+adapter.raw.queries; // Array<{ text, params, inTransaction }>
+```
+
+`inTransaction` is true for queries that ran inside a `transaction()`
+callback, which lets you assert that a write happened on a leased
+connection. You can also pass capabilities to simulate a transport:
+
+```ts
+createFixtureDatabase({
+  capabilities: { interactiveTransactions: false },
+});
+// now db.transaction() fails before dispatch, exactly like Neon HTTP
+```
+
+## What fixtures cannot tell you
+
+- Whether your SQL parses or your schema matches. The fixture returns what
+  you scripted, not what PostgreSQL would do.
+- Whether transactions actually commit, roll back, or release connections.
+- Type decoding: `bigint` as string, timestamp handling, JSON, arrays.
+
+Those need a real database. The repository's own tests run against a real
+local Postgres 17 in Docker plus a local Neon HTTP proxy; the commands are
+in the [capabilities page](/docs/capabilities#evidence-levels) and
+[CONTRIBUTING](https://github.com/pkyanam/dbSDK/blob/main/CONTRIBUTING.md).
+
+## A practical split
+
+- Unit tests: fixture adapter. Fast, deterministic, no credentials, and
+  they pin your SQL text and parameter shapes.
+- Integration tests: a real local PostgreSQL via `dbsdk/postgres`. Covers
+  binding, decoding, commit/rollback, constraints.
+- Transport tests: the Neon HTTP adapter against a local proxy, when your
+  code depends on HTTP-specific behavior.
+- Hosted checks: against your own Supabase or Neon project if you want
+  them; dbSDK never requires credentials to test, and this project's own
+  suite runs without any.

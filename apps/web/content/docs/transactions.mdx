@@ -1,0 +1,137 @@
+---
+title: Transactions
+description: Interactive transactions, atomic batches, what happens when a connection drops mid-write, and the no-replay rule.
+sidebar:
+  order: 4
+---
+
+dbSDK gives you two transaction tools with deliberately different semantics.
+It never converts one into the other behind your back.
+
+## `db.transaction(fn)`: interactive
+
+The callback runs on a single leased connection. You can branch, read, and
+decide inside it:
+
+```ts
+await db.transaction(async (tx) => {
+  const { rows } = await tx.query("select * from accounts where id = $1 for update", [fromId]);
+  if (rows.length === 0) throw new Error("account not found"); // triggers ROLLBACK
+  await tx.query("update accounts set balance = balance - $1 where id = $2", [amount, fromId]);
+  await tx.query("update accounts set balance = balance + $1 where id = $2", [amount, toId]);
+});
+```
+
+- Success commits; a thrown error rolls back and is rethrown.
+- The `tx` executor offers only `query(text, params)` - there is no
+  `tx.sql`. Parameterized strings are the interface. To reuse a statement
+  built with the `sql` tag inside a transaction, pass its parts:
+  `tx.query(stmt.text, stmt.params)`.
+- **Parameter validation caveat:** `db.sql`, `db.query`, and `db.batch`
+  validate parameters before dispatch (`undefined`, functions, and symbols
+  are rejected). The `tx` executor currently passes parameters straight
+  through to the underlying driver, so apply the same discipline yourself
+  inside callbacks: never pass `undefined` (use `null`), and remember a
+  driver may coerce an invalid value silently.
+- Session-level state (`SET`, temp tables, `LISTEN`) works inside the
+  callback, because the callback owns one connection for its duration.
+
+Availability depends on the transport, and is declared, not guessed:
+
+- Supported on every TCP transport: `postgres`, all three Supabase modes,
+  and Neon with `transactionTransport: "websocket"` or `"postgres"`.
+- On Neon HTTP, `transaction()` fails before dispatch with
+  `DbError` code `CAPABILITY`. Nothing is sent. Use `db.batch` for an atomic
+  multi-statement write, or configure a transaction transport
+  (see [Neon](/docs/adapters/neon)).
+
+There is no automatic fallback from `transaction()` to a batch, because a
+batch cannot contain your control flow, and silently changing semantics is
+how double-charges happen.
+
+## `db.batch(statements)`: atomic, no control flow
+
+```ts
+const results = await db.batch([
+  { text: "insert into users (email) values ($1) returning id", params: ["ada@example.com"] },
+  { text: "insert into profiles (user_id) values ($1)", params: [newUserId] },
+]);
+```
+
+- Atomic by default: all statements commit together or none do. On Neon HTTP
+  this is one round trip through the driver's native batch; on TCP
+  transports dbSDK leases one connection and wraps `BEGIN`/`COMMIT` around
+  the list. On error, everything rolls back and the error is thrown.
+- `db.batch(statements, { atomic: false })` runs the statements sequentially
+  with no transactional guarantee. Use it only for independent statements;
+  the docs say "no guarantee" because that is exactly what it is.
+- Batches accept parameterized statements and reuse the same validation as
+  everywhere else. They do not accept the `sql` tag's composed fragments
+  inline; build `{ text, params }` objects or use `db.sql` for single
+  statements.
+
+`batch()` requires an `atomicBatch` capability, which every current adapter
+declares. If a future adapter lacks it, the call fails before dispatch
+rather than degrading to sequential execution.
+
+## When a write's outcome is unknown
+
+Networks fail in the middle of things. If a connection or timeout error
+happens around a write, dbSDK cannot know whether the server committed, so
+the thrown `DbError` is marked:
+
+```ts
+import { isDbError } from "dbsdk";
+
+try {
+  await db.sql`update accounts set balance = balance - 100 where id = ${id}`;
+} catch (error) {
+  if (isDbError(error) && error.indeterminate) {
+    // The update MAY have committed. Do not blindly retry.
+    // Check the server, or make the write idempotent and retry safely.
+  }
+}
+```
+
+Rules dbSDK follows, and will not change silently:
+
+- **No automatic retry.** Not for writes, not for batches, not for
+  transaction callbacks. A retry can double-apply a committed write.
+- **Conservative marking.** An error with transport character (connection or
+  timeout) during a write-shaped statement, a batch containing any write,
+  or escaping a `transaction()` callback is marked `indeterminate: true`.
+  Top-level read-only statements are not marked on transport failures;
+  inside a transaction, any error without a server SQLSTATE is marked,
+  because dbSDK cannot know whether the callback wrote.
+- **The marker is not proof.** `indeterminate: false` on a write means
+  dbSDK saw no transport failure; it does not certify that PostgreSQL did
+  nothing. Side effects inside functions you call from SQL are your
+  responsibility to reason about.
+
+The standard fix is idempotency: client-generated primary keys plus
+`insert ... on conflict do nothing` (or `do update`), so a safe retry is a
+property of your schema instead of a promise from the driver.
+
+## What gets marked
+
+The rule is a conservative heuristic, not a purity proof:
+
+- A top-level statement that starts with a write keyword is marked on a
+  transport failure. So is a batch containing any write-shaped statement,
+  and a statement with content after a semicolon (the simple protocol would
+  execute it too).
+- Any error escaping a `transaction()` callback without a server SQLSTATE
+  is marked, including errors you threw yourself, because dbSDK cannot know
+  whether your callback wrote before the failure.
+- Side effects the text does not reveal (a `select` that calls a
+  side-effecting function, a trigger on a view) cannot be detected. The
+  heuristic widens `indeterminate`; it never proves a statement was
+  read-only.
+
+## Isolation levels
+
+Isolation is set by the database's default unless your SQL sets it. Issuing
+`set transaction isolation level ...` inside a transaction callback works on
+any TCP transport; Neon HTTP batches use the server default. dbSDK does not
+add an isolation option in this version, so nothing can imply a level the
+transport cannot honor.

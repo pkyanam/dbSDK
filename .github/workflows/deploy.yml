@@ -1,7 +1,18 @@
-# Cloudflare Pages deploy of the Blume docs site (apps/web → dist/)
+# Cloudflare Worker deploy of the Blume docs site (apps/web → server build).
 # Owned by the deployment agent. Core owns all other workflows.
-# Requires repo secrets: CLOUDFLARE_API_TOKEN (Pages Edit on the dbSDK account),
-# CLOUDFLARE_ACCOUNT_ID.
+#
+# Architecture (verified 2026-10-06, see deployment/README.md):
+#   apps/web --blume build (cloudflare() adapter)--> dist/server/wrangler.json
+#   wrangler deploy --> Worker `dbsdk` on https://dbsdk.preetham-981.workers.dev
+#   Vercel project `dbsdk` (deployment/proxy/vercel.json) proxies the public
+#   domains (dbsdk.com, www.dbsdk.com, database-sdk.dev, www.database-sdk.dev)
+#   to the Worker. The Vercel proxy is static config, deployed manually —
+#   no Vercel step here.
+#
+# Requires repo secrets:
+#   CLOUDFLARE_API_TOKEN — Workers Scripts Write + Account Settings Read on the
+#   dbSDK account (token `dbsdk-workers-deploy`)
+#   CLOUDFLARE_ACCOUNT_ID
 
 name: Deploy docs site
 
@@ -17,7 +28,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: pages-deploy
+  group: worker-deploy
   cancel-in-progress: false
 
 jobs:
@@ -38,14 +49,14 @@ jobs:
         working-directory: apps/web
         run: npm ci
 
-      - name: Build docs
+      - name: Build docs (Cloudflare server build)
         working-directory: apps/web
         run: npm run build
 
-      - name: Deploy to Cloudflare Pages
+      - name: Deploy Worker
         uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           workingDirectory: apps/web
-          command: pages deploy dist --project-name=dbsdk --branch=main
+          command: deploy -c dist/server/wrangler.json --name dbsdk

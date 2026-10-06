@@ -1,0 +1,30 @@
+---
+title: Capabilities
+description: What each dbSDK adapter and transport supports, stated plainly.
+sidebar:
+  label: Capabilities
+  order: 2
+seo:
+  canonical: https://dbsdk.com/docs/capabilities
+---
+
+This page has moved into the full documentation.
+
+:::note
+The complete, generated capability matrix lives at
+[docs/capabilities](/docs/capabilities). The short version: all six
+connection modes support parameterized queries and atomic batches.
+Interactive transactions are supported on every TCP transport and on the
+Neon WebSocket transport; the Neon HTTP transport refuses them before
+dispatch. Session state works on a dedicated session, inside
+`transaction()` (which leases one connection) or on a client reached via
+`db.raw`; it does not persist between top-level pooled queries, and it is
+unavailable on the Supabase transaction pooler and on Neon HTTP.
+Unsupported operations fail before dispatch. A supported write can still
+fail in flight: an outcome the client cannot know is reported as
+`indeterminate` and is never replayed automatically.
+:::
+
+Evidence vocabulary: a capability marked as verified by fixtures was checked
+by the automated test suite; hosted-provider verification is an explicit,
+opt-in step and is never implied.

@@ -1,0 +1,77 @@
+---
+title: Postgres adapter
+description: Any PostgreSQL endpoint over TCP with the official pg driver, for local databases and providers beyond the launch adapters.
+sidebar:
+  order: 6
+---
+
+`dbsdk/postgres` connects to any standard PostgreSQL endpoint over TCP using
+the official `pg` driver. Use it for local development against real
+PostgreSQL, for hosted providers beyond the launch adapters, and for the
+integration tests in this repository.
+
+```ts
+import { createDatabase } from "dbsdk";
+import { postgres } from "dbsdk/postgres";
+
+const db = createDatabase({
+  adapter: postgres({ connectionString: process.env.DATABASE_URL! }),
+});
+```
+
+Install `pg` alongside the package (optional peer dependency):
+
+```bash
+npm install pg
+```
+
+## Options
+
+```ts
+type PostgresAdapterOptions = {
+  connectionString: string;             // required
+  max?: number;                         // pool size, default 10
+  idleTimeoutMillis?: number;
+  connectionTimeoutMillis?: number;
+  ssl?: boolean | { rejectUnauthorized: boolean };  // pass false for local non-TLS
+  statementTimeout?: number;            // ms; a client timeout does not prove server-side cancellation
+  applicationName?: string;             // default "dbsdk", visible in pg_stat_activity
+  pool?: object;                        // extra pg Pool options, merged last
+};
+```
+
+The connection string is used exactly as given. The adapter never rewrites
+hosts, guesses SSL settings, or silently changes the pool size.
+
+## Capabilities and evidence
+
+| Capability | Value |
+| --- | --- |
+| `interactiveTransactions` | `true` (tests) |
+| `atomicBatch` | `true` (tests) |
+| `sessionState` | `true` (tests) |
+| `transport` | `tcp` (docs) |
+
+Behavior notes:
+
+- A connection pool may use a different physical connection for each
+  top-level query. Session-scoped state belongs inside `transaction()`,
+  which leases one connection, or on a client you lease via `raw`.
+- `ssl: false` is honored literally; there is no silent downgrade, and
+  remote endpoints should keep TLS with verification on.
+
+## Escape hatch
+
+`db.raw` is the underlying pool, fully typed:
+
+```ts
+const client = await db.raw.connect(); // a dedicated pg client
+try {
+  // LISTEN/NOTIFY, COPY, cursors: everything pg supports
+} finally {
+  client.release();
+}
+```
+
+Once you touch `raw`, you leave the dbSDK contract: results are `pg`-shaped,
+errors are `pg`-shaped, and nothing is normalized. Use it deliberately.

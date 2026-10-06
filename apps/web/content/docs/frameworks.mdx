@@ -1,0 +1,127 @@
+---
+title: Frameworks
+description: Patterns for Express, Next.js, and serverless runtimes, where pool lifetimes and disposal decide whether things work.
+sidebar:
+  order: 10
+---
+
+dbSDK is a server-side library. The patterns below differ mainly in who owns
+the client's lifetime.
+
+## Long-running servers (Express, Fastify, Hono in Node)
+
+Create one client per process at startup and share it. The pool amortizes
+connection cost across requests.
+
+```ts
+import express from "express";
+import { createDatabase } from "dbsdk";
+import { postgres } from "dbsdk/postgres";
+
+const db = createDatabase({
+  adapter: postgres({
+    connectionString: process.env.DATABASE_URL!,
+    max: 10,
+    statementTimeout: 5000,
+  }),
+});
+
+const app = express();
+
+app.get("/users/:id", async (req, res) => {
+  try {
+    const { rows } = await db.sql`
+      select id, email from users where id = ${Number(req.params.id)}
+    `;
+    res.json(rows);
+  } catch (error) {
+    res.status(500).json({ error: "query failed" }); // log the DbError server-side
+  }
+});
+
+const server = app.listen(3000);
+process.on("SIGTERM", () => {
+  server.close(() => db.close().then(() => process.exit(0)));
+});
+```
+
+Note the parameter: `Number(req.params.id)` converts before binding. Values
+are always parameters, so even a raw string would be safe from injection,
+but the cast makes the query's intent explicit and lets PostgreSQL's type
+checking work.
+
+## Next.js (App Router, server components and route handlers)
+
+Module-level clients survive across requests in the Node runtime, so a
+module singleton is the right shape:
+
+```ts
+// lib/db.ts
+import { createDatabase } from "dbsdk";
+import { supabase } from "dbsdk/supabase";
+
+export const db = createDatabase({
+  adapter: supabase({
+    connectionString: process.env.SUPABASE_DB_URL!,
+    connectionMode: "transaction",
+    max: 1, // Supabase's recommendation for serverless runtimes
+  }),
+});
+```
+
+```ts
+// app/users/route.ts
+import { db } from "@/lib/db";
+
+export async function GET() {
+  const { rows } = await db.sql`select id, email from users limit 20`;
+  return Response.json(rows);
+}
+```
+
+Two cautions:
+
+- In development, Next.js re-evaluates modules on hot reload. A module
+  singleton that holds a pool can accumulate. The common fix is caching the
+  client on `globalThis` in dev, the same trick used for other pooled
+  clients.
+- The transaction pooler is the right Supabase mode for serverless-style
+  deployments; remember its session-state restrictions
+  ([Supabase adapter](/docs/adapters/supabase)).
+
+## Serverless functions (per-invocation clients)
+
+When the platform may freeze or discard the runtime between invocations,
+create the client inside the handler and dispose before returning:
+
+```ts
+import { createDatabase } from "dbsdk";
+import { neon } from "dbsdk/neon";
+
+export const handler = async (event) => {
+  await using db = createDatabase({
+    adapter: neon({
+      connectionString: process.env.DATABASE_URL!,
+      transport: "http",
+    }),
+  });
+
+  const { rows } = await db.sql`select * from orders where user_id = ${event.userId}`;
+  return { statusCode: 200, body: JSON.stringify(rows) };
+};
+```
+
+`await using` requires Node 24+ as syntax; on Node 22 use explicit
+`close()` in a `finally`. On Neon, HTTP transport plus `db.batch` is the
+combination designed for this pattern: one request, one round trip for
+multi-statement writes.
+
+## What does not work
+
+- Browser code. Connection strings are secrets and the drivers are
+  server-side; there is no browser build and none is planned.
+- Holding a `transaction()` connection across a request boundary. The
+  callback is the boundary: begin and finish inside it.
+- Keeping long-lived TCP pools in edge runtimes. The Neon HTTP transport
+  is the only path designed for those environments; nothing else has been
+  tested there, and the capabilities table says exactly that.

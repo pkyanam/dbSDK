@@ -1,0 +1,13 @@
+Use case: logo-brand
+Asset type: square app/favicon/social mark for dbSDK, 1024x1024
+Primary request: a distinctive abstract mark for "dbSDK" built from one bold idea — many lines, one node: a solid navy (#003049) rounded square tile centered on a completely flat, solid, opaque cream (#FDF0D5) background; the tile carries a bold cream (#FDF0D5) cutout glyph inside; the glyph is an asymmetric converging geometry — four clean conduit lines entering from different edges (three from the left/bottom in cream, one from the top-right in muted blue #669BBC) all meeting at a single small vivid red (#C1121F) circular node placed slightly off-center, with a short bold cream wedge or bar extending from the node toward the lower-right, suggesting a unified result. The mark is asymmetric on purpose and instantly recognizable at 16px and at 512px.
+Background: opaque solid cream #FDF0D5 filling the entire square edge to edge — not transparent, no alpha channel, no checkerboard, no transparency effects of any kind; the flat cream must be perfectly uniform and identical in tone everywhere outside the tile.
+Subject: abstract geometric connection mark; NOT a literal database icon, NOT a letter
+Style/medium: flat vector precision, bold solid shapes, matte finish, high shape contrast
+Composition/framing: rounded-square tile centered with ~12% clear cream margin on all sides for safe circular cropping; glyph strokes no thinner than ~4% of canvas width so the mark survives 16px
+Interior fills: the navy tile interior must be one single solid, fully opaque, perfectly flat navy #003049 fill right up to the tile outline — zero transparency, zero semi-transparent patches, zero cloudy smudges, zero shading variation anywhere inside the tile
+Lighting/mood: flat, even, no glow
+Color palette: cream #FDF0D5 background and primary glyph lines/wedge, navy #003049 tile, muted blue #669BBC one secondary line, red #C1121F the single node; no maroon, no gradients
+Materials/textures: none — flat clean fills only; explicitly no grain, no noise, no paper texture, no speckles, no cloudiness
+Text (verbatim): none — no letters, numbers, or wordmark
+Avoid: transparent background, alpha cutouts, semi-transparent smudges or clouds inside the tile, database cylinders, cloud shapes, gradient blobs, gloss, bevel, 3D effects, drop shadows, grain, noise, texture, text, watermarks

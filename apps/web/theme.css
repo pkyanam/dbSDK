@@ -1,0 +1,115 @@
+/* dbSDK theme: cream paper, navy structure, red accent.
+   Palette: #780000 deep red, #c1121f red, #fdf0d5 cream, #003049 navy,
+   #669bbc muted blue. Overrides Blume tokens; final layer of the cascade. */
+
+:root {
+  --blume-background: #fdf0d5;
+  --blume-foreground: #003049;
+  --blume-muted: #f6e3c5;
+  --blume-muted-foreground: #3a5a70;
+  --blume-border: #e0cda9;
+  --blume-accent: #c1121f;
+  --blume-accent-foreground: #fdf0d5;
+  --blume-action: #c1121f;
+  --blume-action-foreground: #fdf0d5;
+  --blume-code-background: #003049;
+  --blume-radius: 0.25rem;
+
+  /* dbSDK extended palette (site-specific, not Blume tokens) */
+  --dbsdk-cream: #fdf0d5;
+  --dbsdk-cream-deep: #f6e3c5;
+  --dbsdk-navy: #003049;
+  --dbsdk-navy-deep: #001a2b;
+  --dbsdk-red: #c1121f;
+  --dbsdk-red-deep: #780000;
+  --dbsdk-blue: #669bbc;
+  --dbsdk-ink-soft: #3a5a70;
+  --dbsdk-border: #e0cda9;
+}
+
+:root[data-theme="dark"] {
+  --blume-background: #001a2b;
+  --blume-foreground: #fdf0d5;
+  --blume-muted: #002842;
+  --blume-muted-foreground: #a9c1d1;
+  --blume-border: #1d3a50;
+  --blume-accent: #669bbc;
+  --blume-accent-foreground: #001a2b;
+  --blume-action: #c1121f;
+  --blume-action-foreground: #fdf0d5;
+  --blume-code-background: #001626;
+
+  --dbsdk-cream: #fdf0d5;
+  --dbsdk-cream-deep: #f6e3c5;
+  --dbsdk-navy: #002842;
+  --dbsdk-navy-deep: #00101c;
+  --dbsdk-red: #c1121f;
+  --dbsdk-red-deep: #780000;
+  --dbsdk-blue: #669bbc;
+  --dbsdk-ink-soft: #a9c1d1;
+  --dbsdk-border: #1d3a50;
+}
+
+/* Anchor offsets and focus visibility for the whole site, docs included. */
+html {
+  scroll-padding-top: 5.5rem;
+}
+:focus-visible {
+  outline: 2px solid var(--dbsdk-red);
+  outline-offset: 2px;
+}
+::selection {
+  background: rgba(193, 18, 31, 0.22);
+}
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   Docs code contrast (verified browser defect).
+
+   Blume renders every Shiki surface with the github-dark token palette in both
+   modes, but forces `pre.astro-code` backgrounds to transparent, so dark tokens
+   landed on the cream page background and were unreadable. Inline code took
+   `--blume-code-background` (navy) under `--blume-foreground` (also navy),
+   rendering as solid navy bars.
+
+   Fix, scoped to prose (docs pages only; the homepage uses .dk-* classes):
+   - Code blocks get a navy-deep panel like the homepage code blocks, with
+     cream plain code. The dark github-dark token colors are readable on it.
+   - Inline code becomes navy on a subtle cream chip in light mode and cream
+     on a navy chip in dark mode. Both keep the four-color palette.
+   --------------------------------------------------------------------------- */
+
+/* Code blocks: navy panel, cream plain code, visible language header. */
+.prose pre.astro-code,
+.prose .blume-panel-tabs pre.astro-code,
+.blume-panel-tabs pre.astro-code {
+  background-color: var(--dbsdk-navy-deep) !important;
+  color: var(--dbsdk-cream) !important;
+}
+.prose pre[data-language]:before {
+  color: var(--dbsdk-blue);
+}
+.prose pre[data-language][data-icon]:after {
+  background-color: var(--dbsdk-blue);
+}
+
+/* Inline code: navy text on a cream chip (light), cream on navy (dark). */
+.prose :not(pre) > code {
+  background-color: var(--dbsdk-cream-deep) !important;
+  color: var(--dbsdk-navy) !important;
+  border: 1px solid var(--dbsdk-border);
+}
+:root[data-theme="dark"] .prose :not(pre) > code {
+  background-color: var(--dbsdk-navy) !important;
+  color: var(--dbsdk-cream) !important;
+  border-color: var(--dbsdk-border);
+}

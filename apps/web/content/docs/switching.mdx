@@ -1,0 +1,86 @@
+---
+title: Switching providers
+description: How to change adapters between Postgres, Supabase, and Neon, what carries over, and what you must move yourself.
+sidebar:
+  order: 11
+---
+
+Because every launch adapter is PostgreSQL over a different transport,
+switching is mostly a configuration change. The query code does not change.
+But switching adapters is not data migration, and this page is explicit
+about the difference.
+
+## What carries over
+
+If your application uses the documented client surface, these are identical
+across adapters:
+
+- `db.sql`, `db.query`, `db.batch`, `db.transaction` call sites and their
+  SQL text (PostgreSQL dialect throughout).
+- The result envelope: `rows`, `rowCount`, `command`.
+- `DbError` handling: codes, `sqlstate`, `retryable`, `indeterminate`.
+- Parameterization rules and the `sql` tag helpers.
+- `close()` / disposal patterns.
+
+## What changes
+
+- The adapter import and its options (connection string, mode, transport).
+- Capability-sensitive behavior. Check `db.capabilities` instead of
+  hard-coding assumptions. Example: code that uses `db.transaction()` works
+  on Supabase but needs a transaction transport on Neon HTTP.
+- Session-state-dependent code. The Supabase transaction pooler and Neon
+  HTTP do not carry session state between top-level queries.
+- Environment variables and secret management.
+
+A switch in code looks like this:
+
+```ts
+// before: Neon
+import { neon } from "dbsdk/neon";
+const db = createDatabase({ adapter: neon({ connectionString: NEON_URL }) });
+
+// after: Supabase, same call sites
+import { supabase } from "dbsdk/supabase";
+const db = createDatabase({
+  adapter: supabase({ connectionString: SUPABASE_URL, connectionMode: "session" }),
+});
+```
+
+Keep the client construction in one module and the rest of the code
+transport-blind, and a switch is a one-file diff plus a capabilities
+re-check.
+
+## What does not move automatically
+
+**Data does not move.** Switching the adapter in your code points the
+application at a different database. Nothing copies rows, schemas, users,
+or extensions between services. There is no failover: if one service is
+down, the other does not silently take over.
+
+If you migrate data between providers, you plan it yourself with the usual
+tools (logical replication, dumps and restores, a maintenance window, and a
+cutover you control). A checklist that respects what dbSDK does:
+
+1. Create the target database and apply your schema (migrations you
+   already have).
+2. Copy data with your chosen tool and verify row counts and constraints.
+3. Point the application at the new provider by changing the adapter
+   configuration.
+4. Re-run your integration tests against the target, because capabilities
+   can differ by transport (transaction support, session state).
+5. Keep the old database read-only until you are confident; dbSDK will not
+   sync the two during the window.
+
+## Things that differ between services, not transports
+
+Moving between PostgreSQL services can still surface differences that are
+about the service, not dbSDK or the driver:
+
+- Row-level security and roles: policies and grants live in each database.
+- Extensions: installed per database.
+- Connection limits and pooling behavior per plan.
+- Neon branches or Supabase-specific features do not exist on the other
+  side.
+
+None of these are hidden or translated by dbSDK; the SQL you send runs as
+written on whichever service you point at.

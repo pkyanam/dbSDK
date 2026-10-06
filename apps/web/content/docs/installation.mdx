@@ -1,0 +1,96 @@
+---
+title: Installation
+description: Detailed local-clone build, pack, and consumer setup. npm is not published; this page is the honest way to get the package today.
+sidebar:
+  order: 12
+---
+
+dbSDK is source-distributed for now. There is no npm package, so no
+`npm install dbsdk` instruction appears anywhere in these docs. The package
+name `dbsdk` in the repository does not imply registry availability.
+
+## Requirements
+
+- Node.js 22.12 or newer (verified through Node 26).
+- pnpm 11 for the workspace install.
+- Docker, only if you want to run the live integration tests.
+
+## Clone and build
+
+```bash
+git clone https://github.com/pkyanam/dbSDK.git
+cd dbSDK
+pnpm install
+pnpm --filter dbsdk build
+```
+
+`packages/dbsdk/dist/` now contains the built package: `index.js`,
+`testing.js`, and `adapters/{postgres,supabase,neon}.js`, with declaration
+files for every entry.
+
+## Consume the built package
+
+### Option A: install the directory
+
+```bash
+# from your application directory
+npm install /absolute/path/to/dbSDK/packages/dbsdk
+```
+
+npm copies and builds from the local path. Re-run after rebuilding the
+package if you pull new changes.
+
+### Option B: install a packed tarball
+
+```bash
+cd dbSDK/packages/dbsdk
+npm pack            # dbsdk-0.1.0.tgz
+# from your application directory:
+npm install /absolute/path/to/dbSDK/packages/dbsdk/dbsdk-0.1.0.tgz
+```
+
+### Option C: workspace-style linking in your own monorepo
+
+If your repository uses pnpm workspaces, add the package as a
+`file:` dependency and let pnpm link it:
+
+```jsonc
+{
+  "dependencies": {
+    "dbsdk": "file:../dbSDK/packages/dbsdk"
+  }
+}
+```
+
+## Install the driver you need
+
+The drivers are optional peer dependencies. Install only the one your
+adapter uses. npm installs optional peers automatically when you import
+them; pnpm does not, so add them explicitly:
+
+```bash
+npm install pg                            # postgres + supabase adapters
+npm install @neondatabase/serverless      # neon adapter
+```
+
+A project that imports only `dbsdk` and `dbsdk/testing` needs neither,
+which keeps test suites and bundles lean.
+
+## Verify the install
+
+```bash
+node -e "import('dbsdk').then(m => console.log(typeof m.createDatabase))"
+# prints: function
+```
+
+The repository's `examples/` directory ships a manifest set up exactly this
+way (`file:../packages/dbsdk` plus both drivers) with runnable scripts; see
+[examples on GitHub](https://github.com/pkyanam/dbSDK/tree/main/examples).
+
+## When npm publication happens
+
+It has not happened, and this page will not predict a date. When a package
+is published, the existing subpath structure (`dbsdk`, `dbsdk/postgres`,
+`dbsdk/supabase`, `dbsdk/neon`, `dbsdk/testing`) will be the same, so
+migrating from a local install is a dependency-line change. Check the
+repository README for the current state.

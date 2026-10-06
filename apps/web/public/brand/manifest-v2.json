@@ -1,0 +1,93 @@
+{
+  "brand": "dbSDK",
+  "version": 2,
+  "generatedBy": {
+    "mode": "imagegen skill, built-in image_gen tool",
+    "executor": "parent orchestrator (OpenCode/Codex harness), GLM-designed prompts executed verbatim",
+    "prompts": "design/assets/prompts-redesign.md"
+  },
+  "palette": {
+    "maroon": "#780000",
+    "red": "#C1121F",
+    "cream": "#FDF0D5",
+    "navy": "#003049",
+    "blue": "#669BBC"
+  },
+  "assets": {
+    "banner": {
+      "status": "final",
+      "master": "/brand/banner-v2.png",
+      "masterSize": { "width": 1536, "height": 1024, "bytes": 1379397 },
+      "webp": "/brand/banner-v2.webp",
+      "webpSize": { "width": 1536, "height": 1024, "bytes": 66628 },
+      "sizes": {
+        "1280": "/brand/banner-v2-1280.webp",
+        "768": "/brand/banner-v2-768.webp"
+      },
+      "sizeDetails": {
+        "1280": { "width": 1280, "height": 853, "bytes": 45236 },
+        "768": { "width": 768, "height": 512, "bytes": 20934 }
+      },
+      "aspect": "3:2 (1536x1024 source)",
+      "negativeSpace": "left third 99.95% clean cream, verified by pixel scan; typeset dbSDK there",
+      "bakedText": false,
+      "alpha": false,
+      "checks": {
+        "bakedText": "none found (visual + no high-contrast glyph clusters in scan)",
+        "flatness": "mean luminance gradient 0.48/255 in upper-left quadrant, effectively zero noise or texture",
+        "palette": "cream 81.82%, navy 14.23%, blue 1.02%, other (edge blends) 2.93%; zero green pixels; 3 stray sub-pixel orange-ish fringe px at the red node edge (invisible)",
+        "singleAccent": "one red node, centroid (986,374), frac (0.64,0.37) of frame",
+        "mobileCrop": "safe: node and navy slab both remain visible in a 4:5 and a square center-right crop",
+        "redHueNote": "rendered node red is #E44039 (228,64,57), brighter than mandated #C1121F. Acceptable to ship as-is; if the parent wants exact palette fidelity, an optional imagegen edit can darken the node only. Not a blocker."
+      }
+    },
+    "icon": {
+      "status": "final",
+      "approach": "opaque cream background (fallback route); transparency rejected after two damaged-alpha attempts (rounds 3-4)",
+      "master": "design/assets/icon-master-v2-opaque.png",
+      "masterSize": { "width": 1254, "height": 1254, "bytes": 932717 },
+      "png": "/brand/icon-v2.png",
+      "pngSize": { "width": 1254, "height": 1254, "bytes": 932717 },
+      "webp": "/brand/icon-v2.webp",
+      "webpSize": { "width": 1254, "height": 1254, "bytes": 19104 },
+      "webp512": "/brand/icon-v2-512.webp",
+      "webp512Size": { "width": 512, "height": 512, "bytes": 6044 },
+      "favicon": {
+        "512": "/brand/icon-v2-512.png",
+        "192": "/brand/icon-v2-192.png",
+        "32": "/brand/icon-v2-32.png",
+        "16": "/brand/icon-v2-16.png",
+        "sizes": {
+          "512": { "width": 512, "height": 512, "bytes": 233592 },
+          "192": { "width": 192, "height": 192, "bytes": 30814 },
+          "32": { "width": 32, "height": 32, "bytes": 1470 },
+          "16": { "width": 16, "height": 16, "bytes": 691 }
+        },
+        "appleTouch": "not generated; if needed use /brand/icon-v2-192.png (180x180 crop not produced)"
+      },
+      "alpha": false,
+      "checks": {
+        "opaqueByStructure": "PNG colortype 2 (8-bit RGB truecolor), NO alpha channel, NO tRNS chunk: file contains zero transparency data, so interior holes/blotches of rounds 3-4 are structurally impossible",
+        "sourceIntegrity": "copy verified byte-identical (cmp) to generated_images/exec-eb8aa40d-c0d1-495f-bd30-b30ec9eb04c9.png",
+        "visual": "clean flat navy tile on uniform cream, cream converging glyph + one muted-blue line + single red node; no visible blotches, smudges, or holes at full size",
+        "paletteClaim": "navy tile, cream background/glyph, one blue line, one red node per prompt; pixel-share breakdown not rerun this round (simple check per mandate)",
+        "legibility": "certified visually at 32px (glyph clear) and 16px (recognizable navy mark on cream); 512/192 sharp by construction (pure downscale)",
+        "noAlphaHonesty": "manifest records alpha=false; background is opaque cream #FDF0D5 edge to edge; circular-crop safe with ~12% margin"
+      },
+      "rejected": "rounds 3-4 transparent-background masters (icon-master-v2.png, icon-master-v2-fixed.png) had real interior alpha damage; both retained for record, never published"
+    }
+  },
+  "archival": {
+    "location": "design/assets/rejected-round2/",
+    "note": "round 2 engraved/paper-feel assets (banner.*, icon.*, manifest.json) moved out of /brand; web consumes v2 files only",
+    "files": ["banner.png", "banner.webp", "banner-1280.webp", "banner-768.webp", "icon.png", "icon.webp", "icon-16.png", "icon-32.png", "icon-192.png", "icon-512.png", "manifest.json"]
+  },
+  "conversion": "resize (sips) + webp encode (cwebp 1.6.0 q85); no content edits outside imagegen. Round 5 icon verification: PNG structure parse (colortype/tRNS) + visual inspection + sips metadata; simple check sufficed for an RGB (colortype 2) file",
+  "license": "original generated artwork for dbSDK; no third-party source imagery",
+  "provenance": [
+    "banner source: generated_images/exec-54586934-2f6a-4034-87ee-3c7ba349f577.png (1536x1024 RGB)",
+    "icon source (final, opaque): generated_images/01a10f25-42cb-76b0-aebd-40ec72fd7d66/exec-eb8aa40d-c0d1-495f-bd30-b30ec9eb04c9.png (1254x1254 RGB), parent ran built-in imagegen with transparent_background=false and design/assets/icon-opaque-prompt-v2.txt verbatim",
+    "icon rejected sources (transparency route): generated_images/exec-e7719bf5-4640-425f-9b8e-775dfccdd4e0.png (round 3) and its imagegen edit (round 4); masters kept at design/assets/icon-master-v2.png and icon-master-v2-fixed.png",
+    "archival masters duplicated at design/assets/ (banner-master-v2.png, icon-master-v2-opaque.png); round 2 web files moved to design/assets/rejected-round2/"
+  ]
+}

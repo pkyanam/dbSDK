@@ -1,0 +1,146 @@
+---
+title: Supabase adapter
+description: Supabase Postgres over an explicit connection mode, with strict validation, transaction-pooler guards, and the auth and RLS boundary stated plainly.
+sidebar:
+  order: 7
+---
+
+`dbsdk/supabase` connects to the PostgreSQL database of a Supabase project
+over the standard wire protocol, using the official `pg` driver. Supabase
+documents three SQL connection paths; this adapter supports all three and
+makes you choose one explicitly.
+
+```ts
+import { createDatabase } from "dbsdk";
+import { supabase } from "dbsdk/supabase";
+
+const db = createDatabase({
+  adapter: supabase({
+    connectionString: process.env.SUPABASE_DB_URL!,
+    connectionMode: "session",
+    // Remote Supabase endpoints verify TLS certificates by default and need
+    // Supabase's root CA (see TLS below): pool: { ssl: { ca: caCert } }.
+  }),
+});
+```
+
+Install `pg` alongside the package (optional peer dependency):
+
+```bash
+npm install pg
+```
+
+## Connection modes
+
+| Mode | Endpoint | Port | Named prepared statements | Session state |
+| --- | --- | --- | --- | --- |
+| `direct` | `db.<ref>.supabase.co` | 5432 | yes | yes |
+| `session` | `<region>.pooler.supabase.com` | 5432 | yes | yes |
+| `transaction` | `<region>.pooler.supabase.com` | 6543 | no | no |
+
+- `direct`: the database's own address. Supports everything PostgreSQL
+  does. Some deployments only expose it over IPv6.
+- `session`: the pooler in session mode. Session state works on a single
+  dedicated session, such as inside `transaction()` (which leases one
+  connection) or a client leased via `raw`. It does not persist between
+  separate top-level queries: a pool may use a different pooled connection
+  (or pooler backend) for each call.
+- `transaction`: the pooler in transaction mode. Cheapest for serverless,
+  but each query may land on a different backend: no named prepared
+  statements and no session-level state. Parameterized queries still work,
+  because dbSDK never creates named prepared statements anyway.
+
+**Strict validation.** In the default strict mode the adapter checks that
+the connection string actually points where the declared mode says it does
+(port and pooler username shape), and rejects contradictions with a
+`CONFIGURATION` error before connecting. It never rewrites endpoints or
+guesses a mode from the URL. Set the mode that matches the string you copy
+from the Supabase dashboard.
+
+For serverless runtimes Supabase recommends a small pool; `max: 1` is the
+documented starting point.
+
+## Transaction-mode session guards
+
+Statements that require session state are rejected before dispatch in
+`transaction` mode: plain `SET` (but not `SET LOCAL` inside a transaction),
+`RESET`, `LISTEN`/`UNLISTEN`/`NOTIFY`, `PREPARE`/`DEALLOCATE`, `CREATE
+TEMP`, and `DECLARE ... WITH HOLD`. The rejection is a `CAPABILITY` error
+naming the statement, so a session-state bug fails loudly instead of
+mysteriously on a pooler. Pass `enforceSessionRestrictions: false` if your
+deployment guarantees otherwise.
+
+## TLS
+
+For remote endpoints the adapter defaults to certificate verification ON.
+Supabase endpoints present certificates chaining to Supabase's own root
+CA, which is not in the Node trust store, so the first connection fails
+loudly until you supply that CA. Two supported ways:
+
+1. Pass the CA (from the Supabase dashboard) through the pool options:
+
+```ts
+supabase({
+  connectionString,
+  connectionMode: "session",
+  pool: { ssl: { ca: caCert } },
+})
+```
+
+2. Or encode it in the connection string itself, the way libpq tools do,
+   with `?sslmode=verify-full&sslrootcert=/path/to/supabase-ca.crt`. The
+   driver honors these standard TLS parameters.
+
+To connect encrypted but unverified, pass `ssl: { rejectUnauthorized: false }`
+explicitly. The default never silently disables verification for you.
+Localhost defaults to no TLS.
+
+## What this adapter is not
+
+This is a SQL adapter over the Postgres wire protocol. It is not the
+Supabase Data API:
+
+- No `supabase-js` client, no PostgREST queries, no generated table types.
+- No automatic user identity. A database connection runs as the role in the
+  connection string. Row-level security policies that call `auth.uid()`
+  evaluate against no request context on this path: `auth.uid()` returns
+  null and policies behave accordingly.
+
+If you need request-scoped RLS, two honest patterns exist:
+
+1. Run your trusted server code with a role whose policies do not depend on
+   `auth.uid()`, and filter explicitly.
+2. Use a connection that sets request claims for the transaction
+   (`set local request.jwt.claims`) inside `transaction()`, which is
+   possible because the callback owns one connection. This is a pattern you
+   implement, not a feature dbSDK turns on.
+
+The Supabase REST path (PostgREST, with user JWTs and RLS context) is a
+different transport and is deliberately not part of this SQL surface.
+
+## Capabilities and evidence
+
+Runtime evidence flags (also visible at `db.capabilities.evidence`) are
+`docs` for all capabilities and modes of this adapter: the behaviors are
+stated by Supabase's own documentation, and the transaction-pooler mode
+semantics were additionally verified against a local server exercising the
+same path (see the note after the table). No hosted Supabase project has
+been queried by this project.
+
+| Capability | direct | session | transaction |
+| --- | --- | --- | --- |
+| `interactiveTransactions` | `true` | `true` | `true` |
+| `atomicBatch` | `true` | `true` | `true` |
+| `sessionState` | `true` (dedicated session only) | `true` (dedicated session only) | `false` (guarded before dispatch) |
+| `transport` | `tcp` | `tcp` | `tcp` |
+
+The local verification covered the transaction-mode path specifically:
+mode capabilities, query/commit/rollback, session-state statements refused
+before dispatch, `SET LOCAL` allowed, and atomic batches.
+
+## Escape hatch
+
+`db.raw` exposes `{ pool, connectionMode, resolved }`, where `resolved`
+contains the host, port, database, and project reference the adapter parsed
+from your connection string. `pool` is the `pg` pool; as everywhere, using
+`raw` leaves the normalized contract.

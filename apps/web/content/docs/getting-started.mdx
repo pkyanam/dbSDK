@@ -1,0 +1,150 @@
+---
+title: Getting started
+description: Build dbSDK from a local clone, pick an adapter, and run your first parameterized query.
+sidebar:
+  order: 1
+---
+
+dbSDK is not on npm yet. This guide installs it from the
+[GitHub repository](https://github.com/pkyanam/dbSDK) instead: clone,
+build the package, and point your app at the build output. Everything after
+that is the same on every adapter.
+
+## 1. Build from source
+
+```bash
+git clone https://github.com/pkyanam/dbSDK.git
+cd dbSDK
+pnpm install
+pnpm --filter dbsdk build
+```
+
+The build emits `packages/dbsdk/dist` with the entrypoints you will import:
+`dbsdk` (core), plus the adapter subpaths `dbsdk/postgres`,
+`dbsdk/supabase`, `dbsdk/neon`, and `dbsdk/testing`.
+
+Then bring the package into your app in one of two ways.
+
+**Link the built package** (fastest for local development):
+
+```bash
+# from your app directory
+npm install /absolute/path/to/dbSDK/packages/dbsdk
+```
+
+**Or pack a tarball:**
+
+```bash
+cd packages/dbsdk
+npm pack                # produces dbsdk-0.1.0.tgz
+cd -
+npm install ./packages/dbsdk/dbsdk-0.1.0.tgz   # from your app directory
+```
+
+**Driver requirements.** The two database drivers are optional peer
+dependencies, installed only where you use them:
+
+| Adapter subpath | Driver to install | Used for |
+| --- | --- | --- |
+| `dbsdk/postgres` | `pg` | any PostgreSQL endpoint over TCP |
+| `dbsdk/supabase` | `pg` | Supabase Postgres connections |
+| `dbsdk/neon` | `@neondatabase/serverless` | Neon HTTP, WebSocket, and TCP transaction transports |
+
+`dbsdk` itself and `dbsdk/testing` pull in no database driver, so bundling
+the core does not bundle a driver you do not use.
+
+## 2. Pick an adapter and connect
+
+Each adapter wraps the service you already have. You need one connection
+string from that service's dashboard; nothing is provisioned for you.
+
+```ts
+import { createDatabase } from "dbsdk";
+import { neon } from "dbsdk/neon";
+
+const db = createDatabase({
+  adapter: neon({
+    connectionString: process.env.DATABASE_URL!,
+    transport: "http", // the default
+  }),
+});
+```
+
+The same client shape works for every adapter; only the adapter import and
+its options change. See the adapter pages for the exact options:
+
+- [Postgres](/docs/adapters/postgres): any PostgreSQL endpoint over TCP.
+- [Supabase](/docs/adapters/supabase): explicit `connectionMode`
+  (`direct`, `session`, `transaction`).
+- [Neon](/docs/adapters/neon): `transport` (`http`, `websocket`) and an
+  optional `transactionTransport`.
+
+Keep connection strings in environment variables on the server. dbSDK never
+logs them and never puts them in error messages.
+
+## 3. Run a query
+
+Interpolated values become positional bind parameters. They can never become
+identifiers or fragments of SQL text.
+
+```ts
+const { rows, rowCount, command } = await db.sql`
+  select id, email from users where id = ${userId}
+`;
+// rows: Record<string, unknown>[] unless you annotate the result, e.g.:
+// const typed: QueryResult<{ id: string; email: string }> = await db.sql`...`
+// rowCount: number | null
+// command: "SELECT" (the PostgreSQL command tag, when reported)
+```
+
+Every adapter returns that same envelope, on every transport. A write looks
+like this:
+
+```ts
+const result = await db.sql`
+  insert into users (email) values (${"ada@example.com"})
+  returning id
+`;
+result.rowCount; // 1
+```
+
+Dynamic identifiers are the one thing interpolation must not do, so they
+have their own validated escape hatch:
+
+```ts
+import { sql } from "dbsdk";
+
+await db.query(sql`select * from ${sql.identifier(tableName)} limit 10`);
+```
+
+## 4. Close the connection
+
+`close()` is idempotent, and every operation after it fails before dispatch.
+For serverless functions, prefer explicit disposal so the pool shuts down
+before the invocation returns. The disposal protocol is available in two
+ways depending on your Node version:
+
+```ts
+// Node 24+: await using is supported syntax
+await using db = createDatabase({ adapter: neon({ connectionString }) });
+// closed automatically at the end of the scope
+```
+
+```ts
+// Node 22 (engines require >=22.12): explicit close
+const db = createDatabase({ adapter: neon({ connectionString }) });
+try {
+  // ... queries
+} finally {
+  await db.close();
+}
+// or: await db[Symbol.asyncDispose]() at the end of the scope
+```
+
+## 5. Next steps
+
+- What each transport supports: [Capabilities](/docs/capabilities)
+- Writing queries and building reusable statements: [Queries](/docs/queries)
+- Transactions and batches: [Transactions](/docs/transactions)
+- Working without credentials: [Testing](/docs/testing)
+- Runnable programs in the repository: [`examples/`](https://github.com/pkyanam/dbSDK/tree/main/examples)

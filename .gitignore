@@ -29,3 +29,12 @@ research/
 .cloudflare/
 *.dump
 *.credentials
+
+# Generated image masters, rejected rounds, and analysis scripts stay local.
+# Published: optimized web brand assets (apps/web/public/brand/) and the
+# prompt/provenance text referenced by brand/manifest-v2.json.
+design/assets/*
+!design/assets/prompts.md
+!design/assets/prompts-redesign.md
+!design/assets/icon-opaque-prompt-v2.txt
+!design/assets/icon-edit-prompt-v2.txt
