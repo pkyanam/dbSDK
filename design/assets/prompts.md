@@ -75,3 +75,14 @@ Note: lossless icon.webp was 690 KB; `-preset icon q92 alpha_q 100` cut it to 10
 - Banner: negative space in left third / upper-left quadrant is clear for typeset headline; accent orange used sparingly; matte paper feel; no baked text, no cliché elements observed.
 - Icon: legible at 32px and 16px downscale (dark rounded-square keyline + orange accent retains shape contrast); corners transparent so safe for circular crop.
 - Mobile crop check: banner-768.webp keeps the composition readable; headline negative space survives the crop-safe 768 thumb.
+
+## 5. Social share card — `social-card-v2.png`
+
+Generated: 2026-10-06. Purpose: OG/Twitter `summary_large_image` card for the homepage (replaces the auto-generated `/og/index.png` card and its stale navy/cream palette + SQL-only copy).
+
+- Mode: skill `imagegen` — **built-in `image_gen` tool** (preferred default; no `OPENAI_API_KEY`).
+- Executor: parent orchestrator ran the single `image_gen` call itself (built-in tool available only to the parent; delegated sessions must not duplicate the generation). Prompt executed verbatim as relayed in the parent steer: *"use Image Gen to create a new asset for dbSDK. perhaps just the letters \"dbSDK\" in liquid metal font against a white background idk. minimal text. no logos/icons."* — refined by the parent to: exact dbSDK letters in liquid chrome on white, wide ~1.91:1 social card, no other marks. No fallback CLI/API generation, no duplicates.
+- Output: `~/.codex/generated_images/01a10f25-42cb-76b0-aebd-40ec72fd7d66/exec-beb98af8-7747-4409-af05-d6a4ecf9db4c.png` — **1733×907, 8-bit RGB, opaque, no alpha**. Parent visually confirmed: dbSDK liquid chrome, white background, no extras.
+- Master (archival, stays local per `.gitignore`): `design/assets/social-card-master-v2.png` — byte-identical copy, sha256 `2dcbd8fdf8402f763e74a2edf49f910ee4bc4f8bd69c76049131388bf7006366`.
+- Published (optimized, no stretch): `apps/web/public/social-card-v2.png` — **1200×630, 553,216 bytes, opaque PNG**. Processing: Lanczos3 resize to 1200×628 (exact aspect fit of 1733×907), then 1px top + 1px bottom pure-white pad to 1200×630 (source background is 253–255 white; pad seam imperceptible). Flattened, no alpha.
+- Head wiring: `pages/index.astro` passes `ogImage="/social-card-v2.png"` (root-relative → absolute `https://dbsdk.com/social-card-v2.png` via `deployment.site`), `ogImageSize={{ width: 1200, height: 630 }}`, `ogImageAlt="dbSDK wordmark in liquid metal chrome on a white background"` (Blume `PageLayout` official custom-image props; `og:image:type` is deliberately declared only for generated cards — the served `Content-Type: image/png` governs for custom bitmaps).

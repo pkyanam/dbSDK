@@ -137,10 +137,15 @@ const compatibility = [
   searchEnabled={config.search.enabled}
   siteUrl={config.site}
   ogEnabled={config.og.enabled}
+  // Bespoke social share image (design/assets master, v2 liquid-chrome
+  // wordmark): overrides the generated OG card for the home only; docs pages
+  // keep their generated cards. Root-relative so it resolves against the
+  // deployment site for crawlers; ogImageSize must match the shipped bitmap.
+  ogImage="/social-card-v2.png"
+  ogImageAlt="dbSDK wordmark in liquid metal chrome on a white background"
+  ogImageSize={{ width: 1200, height: 630 }}
   page={{
     title: "dbSDK: All your databases. In the palm of your hand.",
-    description:
-      "Create, manage, and query databases with one SDK. Compatibility across AWS RDS, AWS Aurora, Google Cloud SQL, Google AlloyDB, Supabase, Neon, Heroku, PlanetScale, Convex, and PostgreSQL.",
   }}
 >
   <main class="home">
