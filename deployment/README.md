@@ -111,6 +111,16 @@ Pages Edit on this account) and `CLOUDFLARE_ACCOUNT_ID`; created via
 Never committed: `node_modules`, `dist/`, `.env*`, `.wrangler/`, `.vercel/`,
 `.blume/`, `coordination/`, raw account/API output dumps.
 
+## Completed prerequisites (2026-10-06)
+
+- Public repo: **https://github.com/pkyanam/dbSDK** (owner `pkyanam`, PUBLIC,
+  branch `main`) — initial commit has `.gitignore`, `deploy.yml`, this file.
+- Cloudflare Pages project **`dbsdk`** created → `https://dbsdk.pages.dev`.
+- GitHub repo secrets set (values never displayed): `CLOUDFLARE_API_TOKEN`
+  (Pages Write/Read + Account Settings Read, account-scoped) and
+  `CLOUDFLARE_ACCOUNT_ID`. CI is ready; first production deploy happens at the
+  final deploy round once `apps/web` is complete.
+
 ## Open decision points for the parent
 
 1. Apex-on-Cloudflare needs a nameserver change to Cloudflare (Option B) or the
