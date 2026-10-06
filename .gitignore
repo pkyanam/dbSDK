@@ -26,5 +26,6 @@ coordination/
 research/
 
 # Account/tooling dumps — never commit
+.cloudflare/
 *.dump
 *.credentials
