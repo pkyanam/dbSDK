@@ -169,17 +169,30 @@ const compatibility = [
     </section>
 
     <!-- ============ SPONSORS ============ -->
-    <!-- Compact invitation grid right after the hero: three intentionally
-         empty slots (no fake sponsor names or logos; slots only say
-         "Available") and one sponsor link. All placement is manually
-         curated; donations never auto-place anything. -->
+    <!-- Compact sponsor grid right after the hero: one real sponsor
+         (openlaunch, first slot), two intentionally empty slots (no fake
+         sponsor names or logos; slots only say "Available"), and one
+         sponsor link. All placement is manually curated; donations never
+         auto-place anything. -->
     <section class="sponsors" aria-labelledby="sponsors-title">
       <h2 class="sponsors-title" id="sponsors-title">Sponsors.</h2>
       <div class="sponsors-grid">
-        <div class="sponsor-slot">
-          <span class="sponsor-glyph" aria-hidden="true">&#9711;</span>
-          <span class="sponsor-word">Available</span>
-        </div>
+        <!-- openlaunch is dbSDK's first sponsor. The whole card is one
+             focusable link to https://openlaunch.dev. The mark is
+             openlaunch's own header asset (their public icon.png from
+             github.com/pkyanam/openlaunch, resized — not redrawn), shown
+             with the same monochrome treatment their own site header
+             uses. The name is real visible text; the image is decorative. -->
+        <a class="sponsor-card" href="https://openlaunch.dev" rel="noopener noreferrer">
+          <img
+            class="sponsor-logo"
+            src="/brand/sponsors-openlaunch-icon.png"
+            alt=""
+            width="28"
+            height="28"
+          />
+          <span class="sponsor-name">openlaunch</span>
+        </a>
         <div class="sponsor-slot">
           <span class="sponsor-glyph" aria-hidden="true">&#9711;</span>
           <span class="sponsor-word">Available</span>
@@ -511,10 +524,12 @@ const compatibility = [
   }
 
   /* ---------- sponsors ----------
-     Compact invitation grid directly after the hero. Three intentionally
-     empty dashed slots (a quiet "Available" label, no invented sponsors)
-     and one solid-outline sponsor link. Four across on wider screens,
-     2x2 on phones. */
+     Compact grid directly after the hero. First slot: the real sponsor
+     openlaunch (their own logo asset, monochrome treatment mirroring the
+     openlaunch.dev header). Then two intentionally empty dashed slots
+     (a quiet "Available" label, no invented sponsors) and one
+     solid-outline sponsor link. Four across on wider screens, 2x2 on
+     phones — the same four-block footprint as before the sponsor landed. */
   .sponsors {
     margin-top: 40px;
   }
@@ -531,6 +546,7 @@ const compatibility = [
     gap: 10px;
   }
   .sponsor-slot,
+  .sponsor-card,
   .sponsor-cta {
     display: flex;
     flex-direction: column;
@@ -542,6 +558,34 @@ const compatibility = [
   }
   .sponsor-slot {
     border: 1px dashed var(--line);
+  }
+  .home .sponsor-card {
+    border: 1px solid var(--ink);
+    background: transparent;
+    color: var(--ink);
+    text-decoration: none;
+  }
+  .home .sponsor-card:hover,
+  .home .sponsor-card:focus-visible {
+    opacity: 0.72;
+    text-decoration: none;
+  }
+  .sponsor-logo {
+    /* openlaunch's own header treatment: grayscale mark on light, inverted
+       on dark, so it stays monochrome on both paper colors. Sized to the
+       card's glyph scale (28px), no oversized clipping. */
+    width: 28px;
+    height: 28px;
+    object-fit: contain;
+    filter: grayscale(1);
+  }
+  :global([data-theme='dark']) .sponsor-logo {
+    filter: grayscale(1) invert(1);
+  }
+  .sponsor-name {
+    font-size: 12px;
+    letter-spacing: 0.02em;
+    color: var(--ink);
   }
   .sponsor-glyph {
     font-size: 16px;
@@ -967,8 +1011,13 @@ const compatibility = [
       grid-template-columns: repeat(2, minmax(0, 1fr));
     }
     .sponsor-slot,
+    .sponsor-card,
     .sponsor-cta {
       min-height: 64px;
+    }
+    .sponsor-logo {
+      width: 24px;
+      height: 24px;
     }
     .strip {
       margin-top: 32px;
