@@ -268,9 +268,43 @@ describe('neonManagement factory', () => {
     const { adapter } = makeAdapter((() => Promise.reject(new Error('no calls'))) as typeof fetch);
     expect(adapter.id).toBe('neon');
     expect(adapter.providerId).toBe('neon');
-    expect(adapter.capabilities.resourceKinds).toEqual(['project', 'branch', 'database']);
-    expect(adapter.capabilities.supported.update).toEqual(['project', 'branch', 'database']);
-    expect(adapter.capabilities.supported.delete).toEqual(['project', 'branch', 'database']);
+    // A4: role/endpoint/snapshot are provider-defined kinds on the open kind union.
+    expect(adapter.capabilities.resourceKinds).toEqual([
+      'project',
+      'branch',
+      'database',
+      'role',
+      'endpoint',
+      'snapshot',
+    ]);
+    expect(adapter.capabilities.supported.update).toEqual([
+      'project',
+      'branch',
+      'database',
+      'endpoint',
+      'snapshot',
+    ]);
+    expect(adapter.capabilities.supported.delete).toEqual([
+      'project',
+      'branch',
+      'database',
+      'role',
+      'endpoint',
+      'snapshot',
+    ]);
+    expect(adapter.capabilities.supported.connection).toEqual(['project', 'branch']);
+    expect(adapter.capabilities.supported.resetCredential).toEqual(['role']);
+    expect(adapter.capabilities.supported.actions).toEqual({
+      start: ['endpoint'],
+      suspend: ['endpoint'],
+      restart: ['endpoint'],
+      restore: ['branch', 'snapshot'],
+    });
+    expect(adapter.capabilities.resourceScopes).toEqual({
+      role: ['projectId', 'branchId'],
+      endpoint: ['projectId'],
+      snapshot: ['projectId'],
+    });
     expect(adapter.capabilities.pagination).toBe(true);
     expect(adapter.capabilities.asyncOperations).toBe(true);
     for (const level of Object.values(adapter.capabilities.evidence)) {
@@ -283,11 +317,37 @@ describe('neonManagement factory', () => {
     const { adapter } = makeAdapter((() => Promise.reject(new Error('no calls'))) as typeof fetch);
     const descriptor = describeManagementCapabilities(adapter);
     expect(descriptor.providerId).toBe('neon');
-    expect(descriptor.operations.create).toEqual(['project', 'branch', 'database']);
-    expect(descriptor.operations.delete).toEqual(['project', 'branch', 'database']);
+    expect(descriptor.operations.create).toEqual([
+      'project',
+      'branch',
+      'database',
+      'role',
+      'endpoint',
+      'snapshot',
+    ]);
+    expect(descriptor.operations.delete).toEqual([
+      'project',
+      'branch',
+      'database',
+      'role',
+      'endpoint',
+      'snapshot',
+    ]);
+    expect(descriptor.operations.connection).toEqual(['project', 'branch']);
+    expect(descriptor.operations.resetCredential).toEqual(['role']);
+    expect(descriptor.actions).toEqual({
+      start: ['endpoint'],
+      suspend: ['endpoint'],
+      restart: ['endpoint'],
+      restore: ['branch', 'snapshot'],
+    });
     expect(descriptor.pagination).toBe(true);
     expect(descriptor.asyncOperations).toBe(true);
-    expect(descriptor.resourceScopes).toEqual({});
+    expect(descriptor.resourceScopes).toEqual({
+      role: ['projectId', 'branchId'],
+      endpoint: ['projectId'],
+      snapshot: ['projectId'],
+    });
   });
 });
 
@@ -1381,3 +1441,477 @@ describe('custom kinds are refused before dispatch', () => {
   });
 });
 
+
+// ---------------------------------------------------------------------------
+// Amendment A4 — discovery, connections, roles/credentials, actions, snapshots
+// (official shapes from https://neon.com/api_spec/release/v2.json, verified 2026-10-06)
+// ---------------------------------------------------------------------------
+
+describe('A4: organizations + regions discovery', () => {
+  it('organizations() calls GET /users/me/organizations and maps id/name/handle', async () => {
+    const { fetch, calls } = fakeFetch(() => ({
+      body: {
+        organizations: [
+          { id: 'org-1', name: 'Acme', handle: 'acme', plan: 'free', created_at: NOW, updated_at: NOW, managed_by: 'console' },
+        ],
+      },
+    }));
+    const { client } = makeAdapter(fetch);
+    const orgs = await client.organizations();
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.path).toBe('/users/me/organizations');
+    expect(calls[0]!.method).toBe('GET');
+    expect(calls[0]!.headers.authorization).toBe(`Bearer ${API_KEY}`);
+    expect(orgs).toHaveLength(1);
+    expect(orgs[0]!.providerId).toBe('neon');
+    expect(orgs[0]!.id).toBe('org-1');
+    expect(orgs[0]!.name).toBe('Acme');
+    expect(orgs[0]!.aliasId).toBe('acme');
+  });
+
+  it('regions() calls GET /regions and maps region_id/name/default', async () => {
+    const { fetch, calls } = fakeFetch(() => ({
+      body: {
+        regions: [
+          { region_id: 'aws-us-east-1', name: 'AWS US East (N. Virginia)', default: true, geo_lat: '38', geo_long: '-78' },
+          { region_id: 'aws-eu-west-1', name: 'AWS EU West (Ireland)', default: false },
+        ],
+      },
+    }));
+    const { client } = makeAdapter(fetch);
+    const regions = await client.regions();
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.path).toBe('/regions');
+    expect(regions[0]).toMatchObject({ id: 'aws-us-east-1', default: true });
+    expect(regions[1]!.default).toBe(false);
+    // organizationId is passed through as the official optional org_id query param.
+    await client.regions({ organizationId: 'org-1' });
+    expect(calls[1]!.url.searchParams.get('org_id')).toBe('org-1');
+  });
+
+  it('regions input validation: organizationId must be a non-empty string', async () => {
+    const harness = fakeFetch(() => ({ body: { regions: [] } }));
+    const { client } = makeAdapter(harness.fetch);
+    await expectManagementError(client.regions({ organizationId: '' }), 'CONFIGURATION');
+    expect(harness.calls).toHaveLength(0);
+  });
+});
+
+describe('A4: connection()', () => {
+  it('project: GET /projects/{pid}/connection_uri with required query params; URI redacted by default', async () => {
+    const { fetch, calls } = fakeFetch(() => ({ body: { uri: SECRET_URI } }));
+    const { client } = makeAdapter(fetch);
+    const info = await client.connection({ kind: 'project', id: 'p1' }, { databaseName: 'neondb', roleName: 'app_owner' });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.path).toBe('/projects/p1/connection_uri');
+    expect(calls[0]!.url.searchParams.get('database_name')).toBe('neondb');
+    expect(calls[0]!.url.searchParams.get('role_name')).toBe('app_owner');
+    expect(calls[0]!.url.searchParams.get('branch_id')).toBeNull();
+    expect(info.redactedUri).toBe(`postgresql://app_owner:[redacted]@ep-cool-123.aws.neon.tech/neondb?sslmode=require`);
+    expect(info.secrets).toEqual([]);
+    expect(info.host).toBe('ep-cool-123.aws.neon.tech');
+    expect(info.pooled).toBeNull();
+    expect(JSON.stringify(info)).not.toContain(SECRET_PW);
+  });
+
+  it('branch ref adds branch_id; pooled flag maps to the query parameter', async () => {
+    const { fetch, calls } = fakeFetch(() => ({ body: { uri: SECRET_URI } }));
+    const { client } = makeAdapter(fetch);
+    await client.connection(
+      { kind: 'branch', id: 'b1', projectId: 'p1' },
+      { databaseName: 'neondb', roleName: 'app_owner', pooled: true },
+    );
+    expect(calls[0]!.url.searchParams.get('branch_id')).toBe('b1');
+    expect(calls[0]!.url.searchParams.get('pooled')).toBe('true');
+  });
+
+  it('reveal: true is the explicit opt-in that surfaces the credential and registers it for redaction', async () => {
+    const { fetch, calls } = fakeFetch((req) => {
+      if (req.path.endsWith('/connection_uri')) return { body: { uri: SECRET_URI } };
+      return { status: 500, body: { message: `boom ${SECRET_URI}` } };
+    });
+    const { client } = makeAdapter(fetch);
+    const info = await client.connection(
+      { kind: 'project', id: 'p1' },
+      { databaseName: 'neondb', roleName: 'app_owner', reveal: true },
+    );
+    expect(info.secrets).toEqual([{ label: 'connectionString', value: SECRET_URI }]);
+    // The revealed value must now be scrubbed from every later error message.
+    const err = await expectManagementError(client.list('project', {}), 'PROVIDER');
+    expect(err.message).not.toContain(SECRET_PW);
+    expect(err.message).toContain('[redacted]');
+    expect(calls).toHaveLength(2);
+  });
+
+  it('missing databaseName/roleName is refused CONFIGURATION with zero requests', async () => {
+    const { fetch, calls } = fakeFetch(() => ({ body: { uri: SECRET_URI } }));
+    const { client } = makeAdapter(fetch);
+    await expectManagementError(client.connection({ kind: 'project', id: 'p1' }, {}), 'CONFIGURATION');
+    await expectManagementError(
+      client.connection({ kind: 'project', id: 'p1' }, { databaseName: 'neondb' }),
+      'CONFIGURATION',
+    );
+    expect(calls).toHaveLength(0);
+  });
+});
+
+describe('A4: role lifecycle (provider-defined kind)', () => {
+  const rolePayload = {
+    role: { branch_id: 'b1', name: 'app_user', protected: false, created_at: NOW, updated_at: NOW },
+    operations: [opCreateTimeline],
+  };
+
+  it('create: POST .../branches/{bid}/roles with {role:{name}}; one-time password only in secrets', async () => {
+    const { fetch, calls } = fakeFetch(() => ({
+      body: {
+        role: { branch_id: 'b1', name: 'app_user', password: SECRET_PW, created_at: NOW, updated_at: NOW },
+        operations: [opCreateTimeline],
+      },
+    }));
+    const { client } = makeAdapter(fetch);
+    const result = await client.create({
+      kind: 'role',
+      scope: { projectId: 'p1', branchId: 'b1' },
+      name: 'app_user',
+    } as never);
+    expect(calls[0]!.path).toBe('/projects/p1/branches/b1/roles');
+    expect(calls[0]!.method).toBe('POST');
+    expect(calls[0]!.body).toEqual({ role: { name: 'app_user' } });
+    expect(result.resource).toMatchObject({ kind: 'role', id: 'app_user', name: 'app_user' });
+    expect(result.secrets).toEqual([{ label: 'password:app_user', value: SECRET_PW }]);
+    expect(JSON.stringify(result.resource)).not.toContain(SECRET_PW);
+  });
+
+  it('no_login is passed via providerOptions; unknown providerOptions are refused', async () => {
+    const { fetch, calls } = fakeFetch(() => ({ body: rolePayload }));
+    const { client } = makeAdapter(fetch);
+    await client.create({
+      kind: 'role',
+      scope: { projectId: 'p1', branchId: 'b1' },
+      name: 'reporting',
+      providerOptions: { no_login: true },
+    } as never);
+    expect(calls[0]!.body).toEqual({ role: { name: 'reporting', no_login: true } });
+    await expectManagementError(
+      client.create({
+        kind: 'role',
+        scope: { projectId: 'p1', branchId: 'b1' },
+        name: 'x',
+        providerOptions: { bogus: 1 },
+      } as never),
+      'CONFIGURATION',
+    );
+    expect(calls).toHaveLength(1);
+  });
+
+  it('list: GET .../roles; cursor/limit refused (not paginated)', async () => {
+    const { fetch, calls } = fakeFetch(() => ({ body: { roles: [rolePayload.role] } }));
+    const { client } = makeAdapter(fetch);
+    const page = await client.list('role', { scope: { projectId: 'p1', branchId: 'b1' } } as never);
+    expect(calls[0]!.path).toBe('/projects/p1/branches/b1/roles');
+    expect(page.resources[0]).toMatchObject({ kind: 'role', id: 'app_user' });
+    await expectManagementError(
+      client.list('role', { scope: { projectId: 'p1', branchId: 'b1' }, limit: 5 } as never),
+      'CAPABILITY',
+    );
+    expect(calls).toHaveLength(1);
+  });
+
+  it('get and delete hit the role path; delete aggregates operations', async () => {
+    const { fetch, calls } = fakeFetch((req) => {
+      if (req.method === 'DELETE') return { body: rolePayload };
+      return { body: { role: rolePayload.role } };
+    });
+    const { client } = makeAdapter(fetch);
+    const role = await client.get({ kind: 'role', id: 'app_user', scope: { projectId: 'p1', branchId: 'b1' } } as never);
+    expect(calls[0]!.path).toBe('/projects/p1/branches/b1/roles/app_user');
+    expect(role.id).toBe('app_user');
+    const removed = await client.delete({ kind: 'role', id: 'app_user', scope: { projectId: 'p1', branchId: 'b1' } } as never);
+    expect(removed.operation).not.toBeNull();
+  });
+
+  it('missing scope is refused CONFIGURATION before dispatch', async () => {
+    const { fetch, calls } = fakeFetch(() => ({ body: { roles: [] } }));
+    const { client } = makeAdapter(fetch);
+    await expectManagementError(
+      client.list('role', { scope: { projectId: 'p1' } } as never),
+      'CONFIGURATION',
+    );
+    await expectManagementError(
+      client.get({ kind: 'role', id: 'x' } as never),
+      'CONFIGURATION',
+    );
+    expect(calls).toHaveLength(0);
+  });
+
+  it('resetCredential(role): POST .../roles/{name}/reset_password returns the new password in secrets', async () => {
+    const { fetch, calls } = fakeFetch(() => ({
+      body: { role: { branch_id: 'b1', name: 'app_user', password: 'new-secret-pw', created_at: NOW, updated_at: NOW }, operations: [] },
+    }));
+    const { client } = makeAdapter(fetch);
+    const result = await client.resetCredential({
+      kind: 'role',
+      id: 'app_user',
+      scope: { projectId: 'p1', branchId: 'b1' },
+    } as never);
+    expect(calls[0]!.method).toBe('POST');
+    expect(calls[0]!.path).toBe('/projects/p1/branches/b1/roles/app_user/reset_password');
+    expect(result.secrets).toEqual([{ label: 'password:app_user', value: 'new-secret-pw' }]);
+    // A caller password is refused: Neon generates it server-side.
+    await expectManagementError(
+      client.resetCredential(
+        { kind: 'role', id: 'app_user', scope: { projectId: 'p1', branchId: 'b1' } } as never,
+        { password: 'nope' },
+      ),
+      'CONFIGURATION',
+    );
+  });
+
+  it('resetCredential on non-role kinds is refused CAPABILITY with zero requests', async () => {
+    const { fetch, calls } = fakeFetch(() => ({ body: {} }));
+    const { client } = makeAdapter(fetch);
+    await expectManagementError(client.resetCredential({ kind: 'project', id: 'p1' }), 'CAPABILITY');
+    expect(calls).toHaveLength(0);
+  });
+
+  it('raw.revealRolePassword: GET .../roles/{name}/reveal_password returns the current password', async () => {
+    const { fetch, calls } = fakeFetch(() => ({ body: { password: SECRET_PW } }));
+    const { adapter } = makeAdapter(fetch);
+    const password = await adapter.raw.revealRolePassword({ projectId: 'p1', branchId: 'b1', roleName: 'app_user' });
+    expect(calls[0]!.path).toBe('/projects/p1/branches/b1/roles/app_user/reveal_password');
+    expect(password).toBe(SECRET_PW);
+  });
+});
+
+describe('A4: compute endpoint lifecycle (provider-defined kind)', () => {
+  const endpointPayload = {
+    endpoint: {
+      id: 'ep-cool-123', branch_id: 'b1', project_id: 'p1', host: 'ep-cool-123.aws.neon.tech',
+      type: 'read_write', current_state: 'active', created_at: NOW, updated_at: NOW,
+    },
+    operations: [{ id: 'op-start', project_id: 'p1', branch_id: 'b1', action: 'start_compute', status: 'finished', created_at: NOW, updated_at: NOW }],
+  };
+
+  it('create: POST /projects/{pid}/endpoints with {endpoint:{branch_id,type}}', async () => {
+    const { fetch, calls } = fakeFetch(() => ({ body: endpointPayload }));
+    const { client } = makeAdapter(fetch);
+    const result = await client.create({
+      kind: 'endpoint',
+      scope: { projectId: 'p1' },
+      branchId: 'b1',
+      type: 'read_write',
+    } as never);
+    expect(calls[0]!.path).toBe('/projects/p1/endpoints');
+    expect(calls[0]!.body).toEqual({ endpoint: { branch_id: 'b1', type: 'read_write' } });
+    expect(result.resource).toMatchObject({ kind: 'endpoint', id: 'ep-cool-123', status: 'active', providerStatus: 'active' });
+  });
+
+  it('missing branchId or type is refused CONFIGURATION with zero requests', async () => {
+    const { fetch, calls } = fakeFetch(() => ({ body: endpointPayload }));
+    const { client } = makeAdapter(fetch);
+    await expectManagementError(client.create({ kind: 'endpoint', scope: { projectId: 'p1' }, type: 'read_write' } as never), 'CONFIGURATION');
+    await expectManagementError(client.create({ kind: 'endpoint', scope: { projectId: 'p1' }, branchId: 'b1' } as never), 'CONFIGURATION');
+    expect(calls).toHaveLength(0);
+  });
+
+  it('list maps current_state (init→creating, idle→paused)', async () => {
+    const { fetch } = fakeFetch(() => ({
+      body: {
+        endpoints: [
+          endpointPayload.endpoint,
+          { ...endpointPayload.endpoint, id: 'ep-idle', current_state: 'idle' },
+          { ...endpointPayload.endpoint, id: 'ep-init', current_state: 'init' },
+        ],
+      },
+    }));
+    const { client } = makeAdapter(fetch);
+    const page = await client.list('endpoint', { scope: { projectId: 'p1' } } as never);
+    expect(page.resources.map((r) => r.status)).toEqual(['active', 'paused', 'creating']);
+  });
+
+  it('actions start/suspend/restart hit the official POST paths and return the endpoint + operation', async () => {
+    const { fetch, calls } = fakeFetch(() => ({ body: endpointPayload }));
+    const { client } = makeAdapter(fetch);
+    for (const action of ['start', 'suspend', 'restart'] as const) {
+      const result = await client.action({ kind: 'endpoint', id: 'ep-cool-123', scope: { projectId: 'p1' } } as never, action);
+      expect(calls.at(-1)!.method).toBe('POST');
+      expect(calls.at(-1)!.path).toBe(`/projects/p1/endpoints/ep-cool-123/${action}`);
+      expect(result.resource).toMatchObject({ kind: 'endpoint', id: 'ep-cool-123' });
+      expect(result.operation).not.toBeNull();
+    }
+  });
+
+  it('undeclared endpoint actions and undeclared kinds are refused CAPABILITY before dispatch', async () => {
+    const { fetch, calls } = fakeFetch(() => ({ body: endpointPayload }));
+    const { client } = makeAdapter(fetch);
+    await expectManagementError(
+      client.action({ kind: 'endpoint', id: 'ep', scope: { projectId: 'p1' } } as never, 'pause'),
+      'CAPABILITY',
+    );
+    await expectManagementError(client.action({ kind: 'project', id: 'p1' }, 'pause'), 'CAPABILITY');
+    expect(calls).toHaveLength(0);
+  });
+
+  it('update: PATCH {endpoint:{name}}; empty patch refused', async () => {
+    const { fetch, calls } = fakeFetch(() => ({ body: endpointPayload }));
+    const { client } = makeAdapter(fetch);
+    await client.update({ kind: 'endpoint', id: 'ep-cool-123', scope: { projectId: 'p1' }, patch: { name: 'primary' } } as never);
+    expect(calls[0]!.method).toBe('PATCH');
+    expect(calls[0]!.body).toEqual({ endpoint: { name: 'primary' } });
+    await expectManagementError(
+      client.update({ kind: 'endpoint', id: 'ep-cool-123', scope: { projectId: 'p1' }, patch: {} } as never),
+      'CONFIGURATION',
+    );
+  });
+});
+
+describe('A4: snapshots (provider-defined kind)', () => {
+  const snapshot = { id: 'snap-1', name: 'nightly', source_branch_id: 'b1', created_at: NOW };
+
+  it('create: POST /projects/{pid}/branches/{bid}/snapshot with query params', async () => {
+    const { fetch, calls } = fakeFetch(() => ({
+      body: { snapshot, operations: [{ id: 'op-snap', project_id: 'p1', action: 'create_snapshot', status: 'finished', created_at: NOW, updated_at: NOW }] },
+    }));
+    const { client } = makeAdapter(fetch);
+    const result = await client.create({
+      kind: 'snapshot',
+      scope: { projectId: 'p1' },
+      branchId: 'b1',
+      providerOptions: { name: 'nightly' },
+    } as never);
+    expect(calls[0]!.path).toBe('/projects/p1/branches/b1/snapshot');
+    expect(calls[0]!.url.searchParams.get('name')).toBe('nightly');
+    expect(result.resource).toMatchObject({ kind: 'snapshot', id: 'snap-1', name: 'nightly' });
+    expect(result.operation).not.toBeNull();
+  });
+
+  it('create without branchId is refused CONFIGURATION', async () => {
+    const { fetch, calls } = fakeFetch(() => ({ body: { snapshot } }));
+    const { client } = makeAdapter(fetch);
+    await expectManagementError(client.create({ kind: 'snapshot', scope: { projectId: 'p1' } } as never), 'CONFIGURATION');
+    expect(calls).toHaveLength(0);
+  });
+
+  it('list: GET /projects/{pid}/snapshots', async () => {
+    const { fetch, calls } = fakeFetch(() => ({ body: { snapshots: [snapshot] } }));
+    const { client } = makeAdapter(fetch);
+    const page = await client.list('snapshot', { scope: { projectId: 'p1' } } as never);
+    expect(calls[0]!.path).toBe('/projects/p1/snapshots');
+    expect(page.resources[0]).toMatchObject({ kind: 'snapshot', id: 'snap-1' });
+  });
+
+  it('get is refused CAPABILITY: the official API has no single-snapshot read', async () => {
+    const { fetch, calls } = fakeFetch(() => ({ body: { snapshot } }));
+    const { client } = makeAdapter(fetch);
+    const err = await expectManagementError(
+      client.get({ kind: 'snapshot', id: 'snap-1', scope: { projectId: 'p1' } } as never),
+      'CAPABILITY',
+    );
+    expect(err.message).toContain('no single-snapshot');
+    expect(calls).toHaveLength(0);
+  });
+
+  it('update: PATCH /projects/{pid}/snapshots/{sid} {snapshot:{name}}', async () => {
+    const { fetch, calls } = fakeFetch(() => ({ body: { snapshot: { ...snapshot, name: 'renamed' } } }));
+    const { client } = makeAdapter(fetch);
+    await client.update({ kind: 'snapshot', id: 'snap-1', scope: { projectId: 'p1' }, patch: { name: 'renamed' } } as never);
+    expect(calls[0]!.method).toBe('PATCH');
+    expect(calls[0]!.path).toBe('/projects/p1/snapshots/snap-1');
+    expect(calls[0]!.body).toEqual({ snapshot: { name: 'renamed' } });
+  });
+
+  it('delete: DELETE /projects/{pid}/snapshots/{sid} aggregates operations', async () => {
+    const { fetch, calls } = fakeFetch(() => ({
+      body: { operations: [{ id: 'op-del', project_id: 'p1', action: 'delete_timeline', status: 'finished', created_at: NOW, updated_at: NOW }] },
+    }));
+    const { client } = makeAdapter(fetch);
+    const removed = await client.delete({ kind: 'snapshot', id: 'snap-1', scope: { projectId: 'p1' } } as never);
+    expect(calls[0]!.method).toBe('DELETE');
+    expect(removed.operation).not.toBeNull();
+  });
+
+  it('action restore: POST /projects/{pid}/snapshots/{sid}/restore returns the restored branch', async () => {
+    const { fetch, calls } = fakeFetch(() => ({
+      body: {
+        branch: { id: 'b-new', project_id: 'p1', name: 'restored', current_state: 'init', created_at: NOW, updated_at: NOW },
+        operations: [{ id: 'op-restore', project_id: 'p1', branch_id: 'b-new', action: 'restore_snapshot', status: 'running', created_at: NOW, updated_at: NOW }],
+      },
+    }));
+    const { client } = makeAdapter(fetch);
+    const result = await client.action(
+      { kind: 'snapshot', id: 'snap-1', scope: { projectId: 'p1' } } as never,
+      'restore',
+      { input: { name: 'restored' } },
+    );
+    expect(calls[0]!.method).toBe('POST');
+    expect(calls[0]!.path).toBe('/projects/p1/snapshots/snap-1/restore');
+    expect(calls[0]!.body).toEqual({ name: 'restored' });
+    expect(result.resource).toMatchObject({ kind: 'branch', id: 'b-new', projectId: 'p1' });
+    expect(result.operation).not.toBeNull();
+  });
+});
+
+describe('A4: branch restore action', () => {
+  it('requires input.sourceBranchId and sends the official body', async () => {
+    const { fetch, calls } = fakeFetch(() => ({
+      body: {
+        branch: { id: 'b1', project_id: 'p1', name: 'main', current_state: 'resetting', created_at: NOW, updated_at: NOW },
+        operations: [{ id: 'op-r', project_id: 'p1', branch_id: 'b1', action: 'reset_branch', status: 'running', created_at: NOW, updated_at: NOW }],
+      },
+    }));
+    const { client } = makeAdapter(fetch);
+    await expectManagementError(
+      client.action({ kind: 'branch', id: 'b1', projectId: 'p1' }, 'restore', {}),
+      'CONFIGURATION',
+    );
+    expect(calls).toHaveLength(0);
+    const result = await client.action(
+      { kind: 'branch', id: 'b1', projectId: 'p1' },
+      'restore',
+      { input: { sourceBranchId: 'b1', sourceTimestamp: '2026-10-01T00:00:00Z' } },
+    );
+    expect(calls[0]!.path).toBe('/projects/p1/branches/b1/restore');
+    expect(calls[0]!.body).toEqual({ source_branch_id: 'b1', source_timestamp: '2026-10-01T00:00:00Z' });
+    expect(result.resource).toMatchObject({ kind: 'branch', id: 'b1' });
+  });
+
+  it('maps preserveUnderName to the official preserve_under_name field; rejects unknown input keys', async () => {
+    const { fetch, calls } = fakeFetch(() => ({
+      body: {
+        branch: { id: 'b1', project_id: 'p1', name: 'restored', current_state: 'ready', created_at: NOW, updated_at: NOW },
+        operations: [{ id: 'op-r', project_id: 'p1', branch_id: 'b1', action: 'restore_branch', status: 'running', created_at: NOW, updated_at: NOW }],
+      },
+    }));
+    const { client } = makeAdapter(fetch);
+    await client.action(
+      { kind: 'branch', id: 'b1', projectId: 'p1' },
+      'restore',
+      { input: { sourceBranchId: 'b1', preserveUnderName: 'backup-before-restore' } },
+    );
+    expect(calls[0]!.body).toEqual({
+      source_branch_id: 'b1',
+      preserve_under_name: 'backup-before-restore',
+    });
+    await expectManagementError(
+      client.action(
+        { kind: 'branch', id: 'b1', projectId: 'p1' },
+        'restore',
+        { input: { sourceBranchId: 'b1', notAnOfficialField: true } },
+      ),
+      'CONFIGURATION',
+    );
+  });
+});
+
+describe('A4: raw.recoverProject', () => {
+  it('POST /projects/{pid}/recover returns the recovered project', async () => {
+    const { fetch, calls } = fakeFetch(() => ({
+      body: { project: { id: 'p1', name: 'restored', region_id: 'aws-us-east-1', created_at: NOW, updated_at: NOW }, branches: [] },
+    }));
+    const { adapter } = makeAdapter(fetch);
+    const project = await adapter.raw.recoverProject('p1');
+    expect(calls[0]!.method).toBe('POST');
+    expect(calls[0]!.path).toBe('/projects/p1/recover');
+    expect(project).toMatchObject({ kind: 'project', id: 'p1' });
+  });
+});

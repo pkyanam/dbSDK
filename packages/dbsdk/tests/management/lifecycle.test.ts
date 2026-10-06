@@ -339,3 +339,214 @@ describe('manage round trip (mock control plane, official shapes)', () => {
     expect(calls).toHaveLength(0); // no misleading 300-second hang
   });
 });
+
+// ---------------------------------------------------------------------------
+// Amendment A4 unified flows — the same lifecycle verbs through the new shared
+// surface: connection retrieval, role credentials, compute actions, snapshots.
+// Control plane mocked at official Neon v2 shapes; the SQL leg is real when a
+// local Postgres is configured.
+// ---------------------------------------------------------------------------
+
+describe('A4 unified flows (mock control plane, official shapes)', () => {
+  it('retrieves connection details through the unified API and connects with the revealed credential', async () => {
+    const { fetch, calls } = controlPlane((req) => {
+      if (req.method === 'POST' && req.path === '/projects') {
+        return { status: 201, body: createProjectResponse() };
+      }
+      if (req.path.includes('/operations/')) {
+        return { body: { operation: finished(req.path.split('/').pop()!) } };
+      }
+      if (req.method === 'GET' && req.path === `/projects/${PROJECT_ID}/connection_uri`) {
+        expect(req.url.searchParams.get('database_name')).toBe('neondb');
+        expect(req.url.searchParams.get('role_name')).toBe('app_owner');
+        return { body: { uri: CONNECTION_URI } };
+      }
+      if (req.method === 'GET' && req.path === `/projects/${PROJECT_ID}`) {
+        return { body: { project: createProjectResponse().project } };
+      }
+      throw new Error(`unexpected ${req.method} ${req.path}`);
+    });
+    const management = makeClient(fetch);
+    const created = await management.create({ kind: 'project', name: 'lifecycle-app' });
+    await management.wait(created, { pollIntervalMs: 0 });
+
+    // Default: provider-selected details with the password REDACTED.
+    const info = await management.connection({ kind: 'project', id: PROJECT_ID }, {
+      databaseName: 'neondb',
+      roleName: 'app_owner',
+    });
+    expect(info.redactedUri).not.toContain(ONE_TIME_PASSWORD);
+    expect(info.secrets).toEqual([]);
+    // Explicit reveal: the real credential surfaces only in secrets — and it drives the real
+    // SQL leg below.
+    const revealed = await management.connection(
+      { kind: 'project', id: PROJECT_ID },
+      { databaseName: 'neondb', roleName: 'app_owner', reveal: true },
+    );
+    const connectionString = revealed.secrets.find((s) => s.label === 'connectionString')!.value;
+    expect(connectionString).toBe(CONNECTION_URI);
+    expect(calls.filter((c) => c.path.endsWith('/connection_uri'))).toHaveLength(2);
+
+    if (LOCAL_DB === '') return; // offline run: the bridge is proven by the assertions above
+    const db = createDatabase({ adapter: postgres({ connectionString, ssl: false }) });
+    try {
+      const result = await db.sql<{ one: number }>`select 1 as one`;
+      expect(result.rows[0]?.one).toBe(1);
+    } finally {
+      await db.close();
+    }
+  });
+
+  it('creates a role, waits for its operation, and rotates its password via resetCredential', async () => {
+    const ROLE_PW_1 = 'role-password-one-time';
+    const ROLE_PW_2 = 'role-password-rotated';
+    const { fetch, calls } = controlPlane((req) => {
+      if (req.method === 'POST' && req.path === `/projects/${PROJECT_ID}/branches/${BRANCH_ID}/roles`) {
+        expect(req.body).toEqual({ role: { name: 'app_user' } });
+        return {
+          status: 201,
+          body: {
+            role: { branch_id: BRANCH_ID, name: 'app_user', password: ROLE_PW_1, created_at: '2026-10-06T00:00:00Z', updated_at: '2026-10-06T00:00:00Z' },
+            operations: [{ id: 'op-create-role', project_id: PROJECT_ID, branch_id: BRANCH_ID, action: 'apply_config', status: 'running', failures_count: 0, created_at: '2026-10-06T00:00:00Z', updated_at: '2026-10-06T00:00:00Z', total_duration_ms: 0 }],
+          },
+        };
+      }
+      if (req.path.endsWith('/operations/op-create-role')) {
+        return { body: { operation: { id: 'op-create-role', project_id: PROJECT_ID, branch_id: BRANCH_ID, action: 'apply_config', status: 'finished', failures_count: 0, created_at: '2026-10-06T00:00:00Z', updated_at: '2026-10-06T00:01:00Z', total_duration_ms: 10 } } };
+      }
+      if (req.method === 'GET' && req.path === `/projects/${PROJECT_ID}/branches/${BRANCH_ID}/roles/app_user`) {
+        return { body: { role: { branch_id: BRANCH_ID, name: 'app_user', created_at: '2026-10-06T00:00:00Z', updated_at: '2026-10-06T00:00:00Z' } } };
+      }
+      if (req.method === 'POST' && req.path === `/projects/${PROJECT_ID}/branches/${BRANCH_ID}/roles/app_user/reset_password`) {
+        return {
+          status: 200,
+          body: {
+            role: { branch_id: BRANCH_ID, name: 'app_user', password: ROLE_PW_2, created_at: '2026-10-06T00:00:00Z', updated_at: '2026-10-06T00:02:00Z' },
+            operations: [{ id: 'op-reset-pw', project_id: PROJECT_ID, branch_id: BRANCH_ID, action: 'apply_config', status: 'finished', failures_count: 0, created_at: '2026-10-06T00:02:00Z', updated_at: '2026-10-06T00:02:00Z', total_duration_ms: 5 }],
+          },
+        };
+      }
+      throw new Error(`unexpected ${req.method} ${req.path}`);
+    });
+    const management = makeClient(fetch);
+
+    // Create the role (scope on the custom-kind spec, per the A2 open-kinds rules).
+    const created = await management.create({
+      kind: 'role',
+      scope: { projectId: PROJECT_ID, branchId: BRANCH_ID },
+      name: 'app_user',
+    } as never);
+    expect(created.secrets).toEqual([{ label: 'password:app_user', value: ROLE_PW_1 }]);
+    expect(JSON.stringify(created.resource?.raw)).not.toContain(ROLE_PW_1);
+
+    // wait() polls the role's operation and resolves by fetching the ROLE (not the branch).
+    const role = await management.wait(created, { pollIntervalMs: 0 });
+    expect(role).toMatchObject({ kind: 'role', id: 'app_user' });
+    expect(calls.some((c) => c.path.endsWith('/roles/app_user'))).toBe(true);
+    expect(calls.some((c) => c.path === `/projects/${PROJECT_ID}/branches/${BRANCH_ID}`)).toBe(false);
+
+    // Rotate the credential: new password only in secrets.
+    const rotated = await management.resetCredential({
+      kind: 'role',
+      id: 'app_user',
+      scope: { projectId: PROJECT_ID, branchId: BRANCH_ID },
+    } as never);
+    expect(calls.at(-1)!.path).toBe(`/projects/${PROJECT_ID}/branches/${BRANCH_ID}/roles/app_user/reset_password`);
+    expect(rotated.secrets).toEqual([{ label: 'password:app_user', value: ROLE_PW_2 }]);
+    expect(rotated.secrets[0]!.value).not.toBe(ROLE_PW_1);
+  });
+
+  it('runs the compute lifecycle through action(): suspend → wait → start', async () => {
+    const ENDPOINT_ID = 'ep-lifecycle-1';
+    const endpointBody = (state: string) => ({
+      endpoint: {
+        id: ENDPOINT_ID, project_id: PROJECT_ID, branch_id: BRANCH_ID, host: 'ep-lifecycle-1.aws.neon.tech',
+        type: 'read_write', current_state: state, created_at: '2026-10-06T00:00:00Z', updated_at: '2026-10-06T00:00:00Z',
+      },
+      operations: [{ id: `op-${state}`, project_id: PROJECT_ID, branch_id: BRANCH_ID, action: state === 'idle' ? 'suspend_compute' : 'start_compute', status: 'finished', failures_count: 0, created_at: '2026-10-06T00:00:00Z', updated_at: '2026-10-06T00:01:00Z', total_duration_ms: 10 }],
+    });
+    const { fetch, calls } = controlPlane((req) => {
+      if (req.method === 'POST' && req.path === `/projects/${PROJECT_ID}/endpoints/${ENDPOINT_ID}/suspend`) {
+        return { body: endpointBody('idle') };
+      }
+      if (req.method === 'POST' && req.path === `/projects/${PROJECT_ID}/endpoints/${ENDPOINT_ID}/start`) {
+        return { body: endpointBody('active') };
+      }
+      if (req.method === 'GET' && req.path === `/projects/${PROJECT_ID}/endpoints/${ENDPOINT_ID}`) {
+        return { body: endpointBody('active') };
+      }
+      if (req.path.includes('/operations/')) {
+        return { body: { operation: finished(req.path.split('/').pop()!) } };
+      }
+      throw new Error(`unexpected ${req.method} ${req.path}`);
+    });
+    const management = makeClient(fetch);
+
+    const suspended = await management.action(
+      { kind: 'endpoint', id: ENDPOINT_ID, scope: { projectId: PROJECT_ID } } as never,
+      'suspend',
+    );
+    expect(suspended.resource).toMatchObject({ kind: 'endpoint', id: ENDPOINT_ID, status: 'paused', providerStatus: 'idle' });
+
+    // The action returned an operation; wait() must resolve on the ENDPOINT.
+    const started = await management.action(
+      { kind: 'endpoint', id: ENDPOINT_ID, scope: { projectId: PROJECT_ID } } as never,
+      'start',
+    );
+    const endpoint = await management.wait(started, { pollIntervalMs: 0 });
+    expect(endpoint).toMatchObject({ kind: 'endpoint', id: ENDPOINT_ID, status: 'active' });
+    expect(calls.some((c) => c.path === `/projects/${PROJECT_ID}/endpoints/${ENDPOINT_ID}`)).toBe(true);
+    expect(calls.some((c) => c.path.includes('/branches/'))).toBe(false);
+  });
+
+  it('creates and restores a snapshot through the unified API', async () => {
+    const SNAPSHOT_ID = 'snap-lifecycle-1';
+    const RESTORED_BRANCH = 'br-restored-1';
+    const { fetch, calls } = controlPlane((req) => {
+      if (req.method === 'POST' && req.path === `/projects/${PROJECT_ID}/branches/${BRANCH_ID}/snapshot`) {
+        return {
+          status: 201,
+          body: {
+            snapshot: { id: SNAPSHOT_ID, name: 'nightly', source_branch_id: BRANCH_ID, created_at: '2026-10-06T00:00:00Z' },
+            operations: [{ id: 'op-snapshot', project_id: PROJECT_ID, branch_id: BRANCH_ID, action: 'create_snapshot', status: 'finished', failures_count: 0, created_at: '2026-10-06T00:00:00Z', updated_at: '2026-10-06T00:00:00Z', total_duration_ms: 20 }],
+          },
+        };
+      }
+      if (req.method === 'GET' && req.path === `/projects/${PROJECT_ID}/snapshots`) {
+        return { body: { snapshots: [{ id: SNAPSHOT_ID, name: 'nightly', source_branch_id: BRANCH_ID, created_at: '2026-10-06T00:00:00Z' }] } };
+      }
+      if (req.method === 'POST' && req.path === `/projects/${PROJECT_ID}/snapshots/${SNAPSHOT_ID}/restore`) {
+        expect(req.body).toEqual({ name: 'from-snapshot' });
+        return {
+          status: 200,
+          body: {
+            branch: { id: RESTORED_BRANCH, project_id: PROJECT_ID, name: 'from-snapshot', current_state: 'init', created_at: '2026-10-06T00:05:00Z', updated_at: '2026-10-06T00:05:00Z' },
+            operations: [{ id: 'op-restore', project_id: PROJECT_ID, branch_id: RESTORED_BRANCH, action: 'restore_snapshot', status: 'running', failures_count: 0, created_at: '2026-10-06T00:05:00Z', updated_at: '2026-10-06T00:05:00Z', total_duration_ms: 0 }],
+          },
+        };
+      }
+      throw new Error(`unexpected ${req.method} ${req.path}`);
+    });
+    const management = makeClient(fetch);
+
+    const snap = await management.create({
+      kind: 'snapshot',
+      scope: { projectId: PROJECT_ID },
+      branchId: BRANCH_ID,
+      providerOptions: { name: 'nightly' },
+    } as never);
+    expect(snap.resource).toMatchObject({ kind: 'snapshot', id: SNAPSHOT_ID });
+
+    const snapshots = await management.list('snapshot', { scope: { projectId: PROJECT_ID } } as never);
+    expect(snapshots.resources).toHaveLength(1);
+
+    const restored = await management.action(
+      { kind: 'snapshot', id: SNAPSHOT_ID, scope: { projectId: PROJECT_ID } } as never,
+      'restore',
+      { input: { name: 'from-snapshot' } },
+    );
+    expect(restored.resource).toMatchObject({ kind: 'branch', id: RESTORED_BRANCH, projectId: PROJECT_ID });
+    // The restore returned an operation for the NEW branch; wait() would poll it as a branch.
+    expect(restored.operation?.ref).toMatchObject({ kind: 'branch', id: RESTORED_BRANCH });
+  });
+});

@@ -151,6 +151,49 @@ function validateAdapter(adapter: unknown): asserts adapter is ManagementAdapter
         'of non-empty kind strings when provided.',
     );
   }
+  // A4 optional per-kind declarations (connection / resetCredential / actions).
+  for (const flag of ['connection', 'resetCredential'] as const) {
+    const kinds = capabilities?.supported?.[flag];
+    if (kinds !== undefined) {
+      if (!Array.isArray(kinds) || kinds.some((kind) => typeof kind !== 'string' || kind.length === 0)) {
+        throw configurationError(
+          `Management adapter "${a.id}" has malformed capabilities: supported.${flag} must be ` +
+            'an array of non-empty kind strings when provided.',
+        );
+      }
+      // A declared capability implies the implementing method exists (CONFIGURATION, not a late TypeError).
+      if (kinds.length > 0 && typeof a[flag] !== 'function') {
+        throw configurationError(
+          `Management adapter "${a.id}" declares supported.${flag} kinds but does not implement ` +
+            `${flag}().`,
+        );
+      }
+    }
+  }
+  const actions = capabilities?.supported?.actions;
+  if (actions !== undefined) {
+    if (
+      typeof actions !== 'object' ||
+      actions === null ||
+      Object.entries(actions).some(
+        ([name, kinds]) =>
+          typeof name !== 'string' ||
+          name.length === 0 ||
+          !Array.isArray(kinds) ||
+          kinds.some((kind) => typeof kind !== 'string' || kind.length === 0),
+      )
+    ) {
+      throw configurationError(
+        `Management adapter "${a.id}" has malformed capabilities: supported.actions must be a ` +
+          'record of action name -> array of non-empty kind strings when provided.',
+      );
+    }
+    if (Object.keys(actions).length > 0 && typeof a.action !== 'function') {
+      throw configurationError(
+        `Management adapter "${a.id}" declares supported.actions but does not implement action().`,
+      );
+    }
+  }
 }
 
 /**
@@ -502,6 +545,7 @@ function createManagement<TAdapter extends ManagementAdapter>(options: {
     providerId: adapter.providerId,
     adapterId,
     capabilities,
+    ...createA4Methods(adapter, capabilities, adapterId, run),
 
     async create(spec, callOptions) {
       validateCreateSpec(spec);
@@ -694,6 +738,138 @@ function createManagement<TAdapter extends ManagementAdapter>(options: {
   return client;
 }
 
+/**
+ * A4 client members (discovery, connections, actions, credentials). Built as a factory over the
+ * already-validated adapter so the gating closures share the capability table.
+ */
+function createA4Methods<TAdapter extends ManagementAdapter>(
+  adapter: TAdapter,
+  capabilities: ManagementAdapterCapabilities,
+  adapterId: ManagementProviderId,
+  run: <T>(context: ManagementErrorContext, fn: () => Promise<T>) => Promise<T>,
+): Pick<ManagementClient<TAdapter['raw']>, 'organizations' | 'regions' | 'connection' | 'action' | 'resetCredential'> {
+  return {
+    async organizations(callOptions) {
+      if (typeof adapter.organizations !== 'function') {
+        throw capabilityError(
+          `organizations is not supported by the '${adapterId}' adapter: the provider has no ` +
+            'organization discovery endpoint implemented here. Use the adapter\'s raw escape ' +
+            'hatch or its documented prerequisite fields instead.',
+          { adapterId },
+        );
+      }
+      return run({ adapterId }, () => adapter.organizations!(callOptions));
+    },
+
+    async regions(input = {}, callOptions) {
+      if (typeof adapter.regions !== 'function') {
+        throw capabilityError(
+          `regions is not supported by the '${adapterId}' adapter: no region discovery endpoint ` +
+            'is implemented here.',
+          { adapterId },
+        );
+      }
+      if (
+        input.organizationId !== undefined &&
+        (typeof input.organizationId !== 'string' || input.organizationId === '')
+      ) {
+        throw configurationError('regions input.organizationId must be a non-empty string when provided.');
+      }
+      return run({ adapterId }, () => adapter.regions!(input, callOptions));
+    },
+
+    async connection(ref, input = {}, callOptions) {
+      const refContext = validateRef(ref, capabilities.resourceScopes);
+      const supported = capabilities.supported.connection;
+      if (supported === undefined || !supported.includes(ref.kind)) {
+        throw capabilityError(
+          `connection is not supported for kind '${ref.kind}' by the '${adapterId}' adapter.` +
+            (supported === undefined
+              ? ' The adapter declares no connection capability.'
+              : ` Kinds supporting connection: ${supported.map((k) => `'${k}'`).join(', ')}.`),
+          { adapterId, ...refContext },
+        );
+      }
+      if (typeof adapter.connection !== 'function') {
+        throw capabilityError(`connection is not implemented by the '${adapterId}' adapter.`, {
+          adapterId,
+          ...refContext,
+        });
+      }
+      return run(refContext, () => adapter.connection!(ref, input, callOptions));
+    },
+
+    async action(ref, action, actionOptions = {}) {
+      const refContext = validateRef(ref, capabilities.resourceScopes);
+      const actions = capabilities.supported.actions;
+      const kinds = actions?.[action];
+      if (actions === undefined || kinds === undefined || !kinds.includes(ref.kind)) {
+        const declared = actions === undefined ? [] : Object.keys(actions);
+        throw capabilityError(
+          `action '${action}' is not supported for kind '${ref.kind}' by the '${adapterId}' adapter.` +
+            (declared.length === 0
+              ? ' The adapter declares no lifecycle actions.'
+              : ` Declared actions: ${declared.map((a) => `'${a}'`).join(', ')}.`),
+          { adapterId, ...refContext },
+        );
+      }
+      if (typeof adapter.action !== 'function') {
+        throw capabilityError(`action is not implemented by the '${adapterId}' adapter.`, {
+          adapterId,
+          ...refContext,
+        });
+      }
+      if (actionOptions.input !== undefined && !isPlainObject(actionOptions.input)) {
+        throw configurationError('action input must be a plain object.', refContext);
+      }
+      return run(refContext, () =>
+        adapter.action!(
+          ref,
+          action,
+          {
+            input: actionOptions.input,
+            signal: actionOptions.signal,
+            timeoutMs: actionOptions.timeoutMs,
+          },
+        ),
+      );
+    },
+
+    async resetCredential(ref, resetOptions = {}) {
+      const refContext = validateRef(ref, capabilities.resourceScopes);
+      const supported = capabilities.supported.resetCredential;
+      if (supported === undefined || !supported.includes(ref.kind)) {
+        throw capabilityError(
+          `resetCredential is not supported for kind '${ref.kind}' by the '${adapterId}' adapter.` +
+            (supported === undefined
+              ? ' The adapter declares no credential reset capability.'
+              : ` Kinds supporting resetCredential: ${supported.map((k) => `'${k}'`).join(', ')}.`),
+          { adapterId, ...refContext },
+        );
+      }
+      if (typeof adapter.resetCredential !== 'function') {
+        throw capabilityError(`resetCredential is not implemented by the '${adapterId}' adapter.`, {
+          adapterId,
+          ...refContext,
+        });
+      }
+      if (resetOptions.password !== undefined && typeof resetOptions.password !== 'string') {
+        throw configurationError('resetCredential password must be a string when provided.', refContext);
+      }
+      return run(refContext, () =>
+        adapter.resetCredential!(
+          ref,
+          {
+            password: resetOptions.password,
+            signal: resetOptions.signal,
+            timeoutMs: resetOptions.timeoutMs,
+          },
+        ),
+      );
+    },
+  };
+}
+
 /** Structured capability description for one management adapter. */
 export type ManagementCapabilityDescriptor = {
   providerId: ManagementProviderId;
@@ -706,7 +882,13 @@ export type ManagementCapabilityDescriptor = {
     get: readonly ManagementResourceKind[];
     update: readonly ManagementResourceKind[];
     delete: readonly ManagementResourceKind[];
+    /** (A4) Kinds supporting connection retrieval; empty when not declared. */
+    connection: readonly ManagementResourceKind[];
+    /** (A4) Kinds supporting credential reset; empty when not declared. */
+    resetCredential: readonly ManagementResourceKind[];
   };
+  /** (A4) Declared lifecycle actions and the kinds that support them. */
+  actions: Readonly<Record<string, readonly ManagementResourceKind[]>>;
   pagination: boolean;
   asyncOperations: boolean;
   /** Kinds with a pollable status field; undefined when the adapter makes no declaration. */
@@ -737,7 +919,10 @@ export function describeManagementCapabilities(
       get: adapter.capabilities.resourceKinds,
       update: adapter.capabilities.supported.update,
       delete: adapter.capabilities.supported.delete,
+      connection: adapter.capabilities.supported.connection ?? [],
+      resetCredential: adapter.capabilities.supported.resetCredential ?? [],
     },
+    actions: adapter.capabilities.supported.actions ?? {},
     pagination: adapter.capabilities.pagination,
     asyncOperations: adapter.capabilities.asyncOperations,
     statusPolling: adapter.capabilities.statusPolling,

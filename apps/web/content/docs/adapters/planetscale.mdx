@@ -1,0 +1,180 @@
+---
+title: PlanetScale Postgres adapter
+description: PlanetScale Postgres over the standard pg wire protocol — mandatory verified TLS, direct and PgBouncer pooled modes with explicit guards, plus the service-token management adapter.
+sidebar:
+  order: 9
+---
+
+[PlanetScale](https://planetscale.com) offers PostgreSQL databases (alongside
+its Vitess/MySQL product). PlanetScale Postgres speaks the **standard
+PostgreSQL wire protocol**, so this adapter reuses the same engine,
+parameterized SQL, transaction, batch, and error semantics as the
+[postgres](/docs/adapters/postgres) adapter — via the official `pg` driver,
+which is an optional peer dependency you install as usual.
+
+```ts
+import { createDatabase, sql } from "dbsdk";
+import { planetscale } from "dbsdk/planetscale";
+
+const db = createDatabase({
+  adapter: planetscale({
+    connectionString: process.env.DATABASE_URL!, // from a role's connection info
+    connectionMode: "direct", // required: "direct" | "pooled"
+  }),
+});
+
+const userId = 1; // the value you're looking up
+const { rows } = await db.query(sql`select id from users where id = ${userId}`);
+await db.close();
+```
+
+**Only PlanetScale Postgres is supported.** Vitess/MySQL (different
+placeholders, backtick identifiers, no `RETURNING`) and the Neki preview are
+separate systems and are refused, not approximated — see the
+[management](#management) section for how the engine gate enforces this.
+
+## Two connection modes
+
+PlanetScale Postgres exposes two ports with different session semantics, and
+the adapter makes the mode an explicit, validated choice:
+
+| Mode | Port | Session semantics |
+| --- | --- | --- |
+| `connectionMode: "direct"` | 5432 | Full sessions: DDL, session variables, temp tables, long transactions |
+| `connectionMode: "pooled"` | 6432 | PgBouncer transaction pooling: guarded before dispatch |
+
+The adapter does not rewrite endpoints: a `direct` connection string that
+targets the pooler port (or vice versa) is refused before any connection is
+made. If you intentionally point at a nonstandard endpoint, pass
+`allowModeMismatch: true`.
+
+### Pooled mode guards
+
+On `pooled`, session-level state does not survive between transactions, so the
+same guards the Supabase transaction pooler uses apply before dispatch
+(`CAPABILITY`, nothing is sent):
+
+- session-state statements — `SET`, `RESET`, `LISTEN`/`NOTIFY`,
+  `PREPARE`/`DEALLOCATE`, `CREATE TEMP`, `DECLARE ... WITH HOLD` — including
+  attempts hidden behind leading comments or inside multi-statement strings;
+- multi-statement query strings (a conservative refusal: one statement per
+  call on the pooled path).
+
+Plain queries, `SET LOCAL` inside a transaction, dollar-quoted bodies with
+semicolons, and string literals containing "set" all pass. `raw.pool` remains
+the native escape hatch — it bypasses the guard by design and is not a SQL
+sandbox. On `direct` these statements run normally.
+
+## TLS
+
+PlanetScale Postgres requires TLS with certificate verification
+(`sslmode=verify-full`, system CA store). The adapter's policy:
+
+- **Remote hosts default to verified TLS** (`rejectUnauthorized: true`, Node's
+  system trust store), and unencrypted remote connections are refused —
+  including attempts to sneak `sslmode=disable` in through the URL or
+  `pool: { ssl: false }` past the options.
+- **Connection-string SSL directives are canonicalized, not passed through.**
+  pg's own URL parser would otherwise silently override the resolved policy
+  (verified against pg 8.x: `?sslmode=require` discards a configured CA;
+  `?sslcert=...` reads files from disk). The adapter strips the SSL parameters
+  from the URL it hands to `pg` and enforces the resolved policy itself:
+  `sslmode=require|verify-full` and `ssl=true` are accepted; `prefer`, `allow`,
+  `verify-ca`, empty, and unknown values, file-loading parameters
+  (`sslcert`/`sslkey`/`sslrootcert`), `sslnegotiation`, `uselibpqcompat`, and
+  conflicting directives are refused before the pool exists. Non-SSL URL
+  parameters (e.g. `application_name`) are preserved untouched.
+- **A custom CA survives**: an explicit `ssl: { rejectUnauthorized: true, ca }`
+  stays in the final driver config even when the URL also carries
+  `sslmode=require` (where pg alone would have discarded it).
+- **The one deliberate escape hatch** is an explicit
+  `ssl: { rejectUnauthorized: false }` in the options — an intentional,
+  documented override for tools that must skip verification; no URL directive
+  can produce it, and remote plaintext (`ssl: false`) is still refused. Note
+  this is weaker than libpq `verify-full` (system trust store, no CA pinning
+  by default).
+- **Localhost** (including `*.localhost`) defaults to no TLS for local
+  testing, and explicit local plaintext is allowed.
+
+## Management
+
+The management side is `dbsdk/management/planetscale`, driven by a PlanetScale
+**service token** (`tokenId` + `tokenSecret`, sent as the official
+`Authorization: <id>:<secret>` header — no Bearer scheme):
+
+```ts
+import { createManagement } from "dbsdk/management";
+import { planetscaleManagement } from "dbsdk/management/planetscale";
+
+const management = createManagement({
+  adapter: planetscaleManagement({
+    tokenId: process.env.PLANETSCALE_TOKEN_ID!,
+    tokenSecret: process.env.PLANETSCALE_TOKEN_SECRET!,
+    organization: "my-org-slug", // required owner for all CRUD
+  }),
+});
+
+const result = await management.create({
+  kind: "project",
+  name: "my-database",
+  providerOptions: { cluster_size: "PS-10-GP" },
+});
+const database = await management.wait(result);
+```
+
+How PlanetScale's model maps onto the unified verbs:
+
+| Unified kind | PlanetScale resource | Addressing |
+| --- | --- | --- |
+| `project` | **database** (the managed, billable unit) | name slug |
+| `branch` | database branch (scoped to the database slug) | name |
+| `role` (provider-defined) | Postgres role credentials, scoped to `{ projectId, branchId }` | **id** (uid), not name |
+
+Key behaviors, all enforced before dispatch:
+
+- **Organization-scoped CRUD.** The factory `organization` is the required
+  owner for every CRUD verb, including `create('project')` — a
+  `spec.organizationId` that differs from it is refused with zero HTTP.
+  Discovery (`organizations()`, `regions()`, `raw.clusterSizeSkus()`) may
+  target other orgs explicitly.
+- **Engine gate.** Every mutating verb first fetches the parent database (one
+  documented extra GET, never cached) and refuses a non-PostgreSQL parent
+  **before the mutation is sent**. Reads refuse non-PostgreSQL payloads too,
+  and `list()` filters mixed-engine pages rather than surfacing them.
+- **`cluster_size` is required at create** (official API) and passed through
+  `providerOptions`; unknown provider options are refused. There is no `plan`
+  field and no create-time password — credentials come from roles only.
+- **Discovery is unfiltered**: `raw.clusterSizeSkus()` always sends
+  `engine=postgresql` (the official default is mysql) and returns the official
+  array exactly as sent, including `enabled: false` entries — filtering is
+  your call, the adapter does not guess.
+- **Pagination** is page-based; `limit` above the official maximum of 100 is
+  refused (no silent clamp), and the cursor carries the next page number.
+- **Connection strings**: `connection(ref)` resolves the official host and
+  role username for `project`, `branch`, or `role`. Role passwords are
+  **one-time secrets** from create/reset — they surface only in `secrets`,
+  are redacted from `raw`, and are registered for later error-message
+  redaction. `connection()` can never produce a password (nothing is
+  fabricated from the service token).
+- **`resetCredential(role)`** rotates a role's password (server-generated;
+  caller-supplied passwords are refused, as on the other providers).
+  `raw.renewRole` extends a role's expiration without generating a password.
+- **Waiting polls real status**: PlanetScale has no operations endpoint, so
+  `wait()` polls the resource's own readiness (`project`, `branch`, and `role`
+  all expose it; role readiness respects terminal/deletion and
+  expired/disabled states before any `ready: true`).
+
+Refused rather than guessed (official endpoints exist but are not verified
+this round): branch `update` (PATCH), backups/restore, deploy requests, IP
+restrictions, bouncers, and any lifecycle actions — the adapter declares no
+`actions` at all.
+
+## Evidence and limits
+
+Behavior is covered by automated tests: adapter contract tests with
+fixture pools and an injected management HTTP layer, plus live legs against a
+real local PostgreSQL 17 for the wire protocol, TLS config resolution, and the
+pooled guards. The control-plane behavior is verified against the official
+PlanetScale API documentation (evidence level `docs`). **No hosted PlanetScale
+endpoint has been exercised by this project** — TLS/SCRAM behavior against the
+real service and provisioning are documented claims, not live-verified ones.

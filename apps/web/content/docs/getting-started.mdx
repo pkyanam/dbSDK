@@ -41,14 +41,16 @@ cd -
 npm install ./packages/dbsdk/dbsdk-0.1.0.tgz   # from your app directory
 ```
 
-**Driver requirements.** The two database drivers are optional peer
+**Driver requirements.** The database drivers are optional peer
 dependencies, installed only where you use them:
 
 | Adapter subpath | Driver to install | Used for |
 | --- | --- | --- |
 | `dbsdk/postgres` | `pg` | any PostgreSQL endpoint over TCP |
 | `dbsdk/supabase` | `pg` | Supabase Postgres connections |
+| `dbsdk/planetscale` | `pg` | PlanetScale Postgres connections |
 | `dbsdk/neon` | `@neondatabase/serverless` | Neon HTTP, WebSocket, and TCP transaction transports |
+| `dbsdk/drizzle` | `drizzle-orm` | Drizzle ORM interop over dbSDK connections |
 
 The management subpaths talk to provider control-plane APIs over HTTPS and
 need no database driver: `dbsdk/management` (core client and types),
@@ -69,7 +71,7 @@ service's dashboard (or from the management path below), and nothing else
 is required.
 
 **Provision a new one.** With a provider management credential (a Supabase
-personal access token or a Neon API key), the management layer can create
+personal access token, a Neon API key, or a PlanetScale service token), the management layer can create
 the project for you, wait until it is ready, and hand back connection
 details. See [Management](/docs/management). The management credential and
 the SQL connection string are different secrets; [Credentials](/docs/credentials)
@@ -161,6 +163,8 @@ try {
 ## 5. Next steps
 
 - Provision and manage resources: [Management](/docs/management)
+- Move data between databases, resumably: [Sync](/docs/sync)
+- Use Drizzle ORM on the same pool: [Drizzle](/docs/drizzle)
 - Which credential goes where: [Credentials](/docs/credentials)
 - What each transport supports: [Capabilities](/docs/capabilities)
 - Writing queries and building reusable statements: [Queries](/docs/queries)

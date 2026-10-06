@@ -830,3 +830,263 @@ describe('generateDatabasePassword', () => {
     expect(generateDatabasePassword()).not.toBe(generateDatabasePassword());
   });
 });
+
+// ---------------------------------------------------------------------------
+// Amendment A4 — discovery, connection, actions, credential rotation
+// (official shapes from the Supabase Management API v1 OpenAPI spec, verified 2026-10-06)
+// ---------------------------------------------------------------------------
+
+describe('A4: organizations + regions discovery', () => {
+  it('organizations() maps slug (canonical id), deprecated id (alias), and name', async () => {
+    const { fetch, calls } = makeFetch(() => jsonResponse(200, [{ id: '42', slug: ORG_SLUG, name: 'Acme' }]));
+    const client = makeClient(fetch);
+    const orgs = await client.organizations();
+    expect(calls[0]!.url).toBe(`${BASE}/organizations`);
+    expect(calls[0]!.method).toBe('GET');
+    expect(orgs[0]).toEqual({
+      providerId: 'supabase',
+      id: ORG_SLUG,
+      name: 'Acme',
+      aliasId: '42',
+      raw: { id: '42', slug: ORG_SLUG, name: 'Acme' },
+    });
+  });
+
+  it('regions() requires organizationId (the official endpoint requires organization_slug) and maps specific + smartGroup', async () => {
+    const { fetch, calls } = makeFetch(() =>
+      jsonResponse(200, {
+        recommendations: {
+          smartGroup: { name: 'Smart region', code: 'americas', type: 'smartGroup' },
+          specific: [
+            { name: 'East US (North Virginia)', code: 'us-east-1', type: 'specific', provider: 'AWS', status: 'capacity' },
+            { name: 'West US', code: 'us-west-1', type: 'specific', provider: 'AWS_K8S', status: 'other' },
+          ],
+        },
+      }),
+    );
+    const client = makeClient(fetch);
+    await expectError(client.regions()).then((error) => {
+      expect(error.code).toBe('CONFIGURATION');
+    });
+    const regions = await client.regions({ organizationId: ORG_SLUG });
+    expect(calls[0]!.url).toBe(`${BASE}/projects/available-regions?organization_slug=${ORG_SLUG}`);
+    expect(regions.map((region) => region.id)).toEqual(['americas', 'us-east-1', 'us-west-1']);
+    expect(regions[1]).toMatchObject({ platform: 'AWS', name: 'East US (North Virginia)' });
+    expect(regions[0]!.platform).toBeNull(); // smartGroup has no platform
+  });
+});
+
+describe('A4: connection()', () => {
+  it('project (direct): GET /v1/projects/{ref} → database.host; no invented database/role; secrets empty (no credential recovery)', async () => {
+    const { fetch, calls } = makeFetch(() => jsonResponse(200, projectPayload()));
+    const client = makeClient(fetch);
+    const info = await client.connection({ kind: 'project', id: PROJECT_REF }, { reveal: true });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.url).toBe(`${BASE}/projects/${PROJECT_REF}`);
+    expect(info).toMatchObject({
+      providerId: 'supabase',
+      kind: 'project',
+      id: PROJECT_REF,
+      host: `db.${PROJECT_REF}.supabase.co`,
+      database: null,
+      role: null,
+      pooled: false,
+      redactedUri: null,
+      secrets: [],
+    });
+  });
+
+  it('project (pooled): GET /v1/projects/{ref}/config/database/pooler → PRIMARY entry; connection_string redacted unless reveal', async () => {
+    const connectionString = `postgresql://postgres.${PROJECT_REF}:pooler-real-password@aws-0-us-east-1.pooler.supabase.com:6543/postgres`;
+    const { fetch, calls } = makeFetch((req) => {
+      if (req.url.includes('/config/database/pooler')) {
+        return jsonResponse(200, [
+          {
+            identifier: PROJECT_REF,
+            database_type: 'READ_REPLICA',
+            db_host: 'aws-0-us-east-1.pooler.supabase.com',
+            db_port: 6543,
+            db_user: 'postgres.replica',
+            db_name: 'postgres',
+            connection_string: 'postgresql://postgres:x@h:6543/postgres',
+          },
+          {
+            identifier: PROJECT_REF,
+            database_type: 'PRIMARY',
+            db_host: 'aws-0-us-east-1.pooler.supabase.com',
+            db_port: 6543,
+            db_user: `postgres.${PROJECT_REF}`,
+            db_name: 'postgres',
+            connection_string: connectionString,
+          },
+        ]);
+      }
+      return jsonResponse(200, projectPayload());
+    });
+    const client = makeClient(fetch);
+    const info = await client.connection({ kind: 'project', id: PROJECT_REF }, { pooled: true });
+    expect(info.pooled).toBe(true);
+    expect(info.host).toBe('aws-0-us-east-1.pooler.supabase.com');
+    expect(info.role).toBe(`postgres.${PROJECT_REF}`);
+    expect(info.database).toBe('postgres');
+    expect(info.port).toBe(6543);
+    expect(info.redactedUri).toBe(
+      `postgresql://postgres.${PROJECT_REF}:[redacted]@aws-0-us-east-1.pooler.supabase.com:6543/postgres`,
+    );
+    expect(info.secrets).toEqual([]);
+    // Explicit reveal returns the real credential.
+    const revealed = await client.connection({ kind: 'project', id: PROJECT_REF }, { pooled: true, reveal: true });
+    expect(revealed.secrets).toEqual([{ label: 'connectionString', value: connectionString }]);
+    expect(calls.length).toBeGreaterThanOrEqual(4);
+  });
+
+  it('branch: GET /v1/branches/{id} → db_host/db_port/db_user; db_pass only on reveal', async () => {
+    const { fetch, calls } = makeFetch(() => jsonResponse(200, branchDetailPayload()));
+    const client = makeClient(fetch);
+    const info = await client.connection({ kind: 'branch', id: BRANCH_ID, projectId: PROJECT_REF }, {});
+    expect(calls[0]!.url).toBe(`${BASE}/branches/${BRANCH_ID}`);
+    expect(info).toMatchObject({
+      kind: 'branch',
+      host: 'bbbbb-preview.supabase.co',
+      port: 5432,
+      role: 'postgres',
+      secrets: [],
+    });
+    expect(JSON.stringify(info)).not.toContain('branch-real-password-1');
+    const revealed = await client.connection(
+      { kind: 'branch', id: BRANCH_ID, projectId: PROJECT_REF },
+      { reveal: true },
+    );
+    expect(revealed.secrets).toEqual([{ label: 'password', value: 'branch-real-password-1' }]);
+  });
+});
+
+describe('A4: actions (pause / restart / branch reset)', () => {
+  it('pause: POST /v1/projects/{ref}/pause with no body; result truthful (track via get())', async () => {
+    const { fetch, calls } = makeFetch(() => jsonResponse(200, null));
+    const client = makeClient(fetch);
+    const result = await client.action({ kind: 'project', id: PROJECT_REF }, 'pause');
+    expect(calls[0]!.url).toBe(`${BASE}/projects/${PROJECT_REF}/pause`);
+    expect(calls[0]!.method).toBe('POST');
+    expect(calls[0]!.body).toBeUndefined();
+    expect(result).toEqual({ resource: null, operation: null, secrets: [], indeterminate: false });
+  });
+
+  it('restart: POST /v1/projects/{ref}/restart', async () => {
+    const { fetch, calls } = makeFetch(() => jsonResponse(200, null));
+    const client = makeClient(fetch);
+    await client.action({ kind: 'project', id: PROJECT_REF }, 'restart');
+    expect(calls[0]!.url).toBe(`${BASE}/projects/${PROJECT_REF}/restart`);
+    expect(calls[0]!.method).toBe('POST');
+  });
+
+  it('reset (branch): POST /v1/branches/{id}/reset with optional migration_version', async () => {
+    const { fetch, calls } = makeFetch(() =>
+      jsonResponse(201, { workflow_run_id: 'wf-1', message: 'ok' }),
+    );
+    const client = makeClient(fetch);
+    const result = await client.action(
+      { kind: 'branch', id: BRANCH_ID, projectId: PROJECT_REF },
+      'reset',
+      { input: { migrationVersion: '20250312000000' } },
+    );
+    expect(calls[0]!.url).toBe(`${BASE}/branches/${BRANCH_ID}/reset`);
+    expect(calls[0]!.method).toBe('POST');
+    expect(calls[0]!.body).toEqual({ migration_version: '20250312000000' });
+    expect(result.resource).toBeNull();
+    // No input → no body.
+    await client.action({ kind: 'branch', id: BRANCH_ID, projectId: PROJECT_REF }, 'reset');
+    expect(calls[1]!.body).toBeUndefined();
+  });
+
+  it('restore (branch): POST /v1/branches/{id}/restore with no body', async () => {
+    const { fetch, calls } = makeFetch(() => jsonResponse(201, { message: 'Branch restoration initiated' }));
+    const client = makeClient(fetch);
+    const result = await client.action({ kind: 'branch', id: BRANCH_ID, projectId: PROJECT_REF }, 'restore');
+    expect(calls[0]!.url).toBe(`${BASE}/branches/${BRANCH_ID}/restore`);
+    expect(calls[0]!.method).toBe('POST');
+    expect(calls[0]!.body).toBeUndefined();
+    expect(result).toEqual({ resource: null, operation: null, secrets: [], indeterminate: false });
+  });
+
+  it('resume (project): POST /v1/projects/{ref}/restore with no body — the official un-pause operation', async () => {
+    const { fetch, calls } = makeFetch(() => jsonResponse(200, null));
+    const client = makeClient(fetch);
+    const result = await client.action({ kind: 'project', id: PROJECT_REF }, 'resume');
+    expect(calls[0]!.url).toBe(`${BASE}/projects/${PROJECT_REF}/restore`);
+    expect(calls[0]!.method).toBe('POST');
+    expect(calls[0]!.body).toBeUndefined();
+    // Supabase echoes no resource/operation for this endpoint; progress is tracked by polling get().
+    expect(result).toEqual({ resource: null, operation: null, secrets: [], indeterminate: false });
+    // The bare action result is not pollable by wait() (no ref to poll); the documented pattern
+    // is wait({ kind: 'project' }) or polling get(), which statusPolling supports.
+    await expectError(client.wait(result)).then((waitError) => {
+      expect(waitError.code).toBe('CONFIGURATION');
+    });
+    expect(calls).toHaveLength(1);
+  });
+
+  it('undeclared actions are refused CAPABILITY before dispatch', async () => {
+    const { fetch, calls } = makeFetch(() => jsonResponse(200, null));
+    const client = makeClient(fetch);
+    // Client level: the core refuses from the declared actions table.
+    await expectError(client.action({ kind: 'project', id: PROJECT_REF }, 'stop')).then((error) => {
+      expect(error.code).toBe('CAPABILITY');
+      expect(error.message).toContain("'pause', 'restart', 'resume', 'reset', 'restore'");
+    });
+    await expectError(client.action({ kind: 'branch', id: BRANCH_ID, projectId: PROJECT_REF }, 'pause')).then(
+      (error) => {
+        expect(error.code).toBe('CAPABILITY');
+      },
+    );
+    await expectError(client.action({ kind: 'branch', id: BRANCH_ID, projectId: PROJECT_REF }, 'resume')).then(
+      (error) => {
+        expect(error.code).toBe('CAPABILITY');
+      },
+    );
+    expect(calls).toHaveLength(0);
+    // Direct adapter use gets the honest explanation, including the official restore endpoint
+    // that resume maps to.
+    const adapter = makeAdapter(makeFetch(() => jsonResponse(200, null)).fetch);
+    await expectError(
+      adapter.action!({ kind: 'project', id: PROJECT_REF }, 'stop'),
+    ).then((error) => {
+      expect(error.code).toBe('CAPABILITY');
+      expect(error.message).toContain('POST /v1/projects/{ref}/restore');
+    });
+  });
+});
+
+describe('A4: resetCredential (project password rotation)', () => {
+  it('generates a strong password when omitted and returns it ONLY in secrets; body uses {password}', async () => {
+    const { fetch, calls } = makeFetch(() => jsonResponse(200, { message: 'Password updated' }));
+    const client = makeClient(fetch);
+    const result = await client.resetCredential({ kind: 'project', id: PROJECT_REF });
+    expect(calls[0]!.url).toBe(`${BASE}/projects/${PROJECT_REF}/database/password`);
+    expect(calls[0]!.method).toBe('PATCH');
+    const body = calls[0]!.body as { password: string };
+    expect(typeof body.password).toBe('string');
+    expect(body.password).toHaveLength(24);
+    expect(result.secrets).toEqual([{ label: 'password', value: body.password }]);
+    expect(JSON.stringify(result.resource)).not.toContain(body.password);
+  });
+
+  it('sends a caller-supplied password verbatim and never echoes it back', async () => {
+    const { fetch, calls } = makeFetch(() => jsonResponse(200, { message: 'Password updated' }));
+    const client = makeClient(fetch);
+    const result = await client.resetCredential({ kind: 'project', id: PROJECT_REF }, { password: 'correct-horse' });
+    expect(calls[0]!.body).toEqual({ password: 'correct-horse' });
+    expect(result.secrets).toEqual([]);
+  });
+
+  it('is refused for non-project kinds before dispatch', async () => {
+    const { fetch, calls } = makeFetch(() => jsonResponse(200, { message: 'ok' }));
+    const client = makeClient(fetch);
+    await expectError(client.resetCredential({ kind: 'branch', id: BRANCH_ID, projectId: PROJECT_REF })).then(
+      (error) => {
+        expect(error.code).toBe('CAPABILITY');
+      },
+    );
+    expect(calls).toHaveLength(0);
+  });
+});

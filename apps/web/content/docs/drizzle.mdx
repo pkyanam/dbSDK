@@ -1,0 +1,145 @@
+---
+title: Drizzle
+description: Optional Drizzle ORM interoperability over dbSDK-owned connections - typed schema queries on the same pool, with dbSDK keeping the lifetime, TLS posture, and guarded-pooler rules.
+sidebar:
+  order: 16
+---
+
+`dbsdk/drizzle` is an optional interoperability entry: it hands Drizzle ORM's
+stable node-postgres / neon-http drivers a **validated, dbSDK-owned driver
+handle**, so you can use Drizzle's typed schema, query builder, and relational
+queries on the same pool dbSDK manages — without giving up the lifetime
+ownership, TLS posture, and guarded-pooler rules that dbSDK enforces.
+
+dbSDK does not fork or wrap Drizzle. Schemas and builders are imported from
+`drizzle-orm` directly; the bridge only supplies the connection and refuses
+anything that would bypass it. There is no claim of full Drizzle parity here —
+Studio, Kit, seed, and validators are separate tools with their own licenses.
+
+## Install
+
+`drizzle-orm` is an **optional peer dependency** (`^0.45.3`, the stable line —
+not the 1.0 RC). The SDK itself stays dependency-free; the Drizzle entry is
+lazy, so installing nothing extra keeps `dbsdk` imports untouched.
+
+```sh
+npm i drizzle-orm@^0.45.3   # or: pnpm add drizzle-orm@^0.45.3
+```
+
+Calling a factory without the peer installed fails before any dispatch with an
+actionable install hint.
+
+A note for `skipLibCheck: false` users: drizzle-orm 0.45.3's own published
+type declarations do not fully typecheck under strict NodeNext even in a bare
+drizzle consumer (~72 upstream errors, with or without dbsdk). With **all
+optional peers you use installed**, dbsdk's packed declarations contribute
+zero errors. If you omit `@neondatabase/serverless` (legitimate when you only
+use `dbsdk/postgres` + `dbsdk/drizzle`), `skipLibCheck: false` reports 2
+unresolved-optional-peer-type errors in dbsdk's own `.d.ts` — the same pattern
+as upstream drizzle entries for their optional peers. `skipLibCheck: true` (the
+setting used for every other dbSDK entry) avoids all of this.
+
+## The shape
+
+```ts
+import { createDatabase } from "dbsdk";
+import { postgres } from "dbsdk/postgres";
+import { drizzlePostgres } from "dbsdk/drizzle";
+import { pgTable, serial, text } from "drizzle-orm/pg-core";
+
+const users = pgTable("users", {
+  id: serial("id").primaryKey(),
+  email: text("email").notNull(),
+});
+
+const db = createDatabase({
+  adapter: postgres({ connectionString: process.env.DATABASE_URL! }),
+});
+
+const drizzleDb = await drizzlePostgres(db, { schema: { users } });
+const rows = await drizzleDb.select().from(users); // fully typed
+
+await db.close(); // YOU still own the lifetime — Drizzle never ends the pool
+```
+
+Both factories are async (they lazy-import the driver) and take the same
+config subset: `{ schema, logger, casing }` — a subset of Drizzle's stable
+`DrizzleConfig<TSchema>`, so schema/relations/logger/casing generic inference
+is preserved exactly.
+
+- `drizzlePostgres(db, config?)` → Drizzle's `NodePgDatabase<TSchema>` with
+  `$client` set to the dbSDK-owned pool.
+- `drizzleNeonHttp(db, config?)` → Drizzle's `NeonHttpDatabase<TSchema>` with
+  `$client` set to the dbSDK-owned neon query function.
+
+## Supported modes
+
+The bridge is deliberately narrow. It accepts what it can verify:
+
+| Database | Accepted by | Why |
+| --- | --- | --- |
+| `dbsdk/postgres` (any PostgreSQL endpoint) | `drizzlePostgres` | TCP, `sessionState: true` |
+| `dbsdk/supabase`, `connectionMode: "direct"` | `drizzlePostgres` | TCP, `sessionState: true` |
+| `dbsdk/supabase`, `connectionMode: "session"` | `drizzlePostgres` | TCP, `sessionState: true` |
+| `dbsdk/planetscale`, `connectionMode: "direct"` | `drizzlePostgres` | TCP, `sessionState: true`; pooled mode is refused like any session-stateless pooler |
+| `dbsdk/neon` with `transport: "http"` | `drizzleNeonHttp` | separate explicit factory, no pool |
+
+Refused **before the raw handle is touched or any pool is created**, with a
+`DbError` code `CONFIGURATION`:
+
+- **Transaction-mode poolers** (`sessionState: false`), e.g. Supabase
+  `connectionMode: "transaction"`. dbSDK's per-statement session-state guards
+  live in its query functions, *not* in the pool — Drizzle executes through
+  the pool directly and would bypass them. Use direct or session mode instead.
+- **HTTP databases** passed to `drizzlePostgres` (use `drizzleNeonHttp`) and
+  TCP databases passed to `drizzleNeonHttp` (use `drizzlePostgres`).
+- **Neon's websocket transport.** Its `raw.pool` is structurally pg-compatible,
+  but dbSDK has not verified that mode for this bridge, so it is refused
+  rather than claimed.
+
+## No DSN, no `connection`, no `client`
+
+Drizzle's own `drizzle()` also accepts a connection string or a
+`{ connection: ... }` config and would construct its **own** `pg.Pool` or
+`neon()` client. That would silently bypass dbSDK's pool configuration —
+including TLS with certificate verification on by default, CA pinning, and
+lifetime ownership. The bridge therefore accepts only a validated dbSDK-owned
+handle:
+
+```ts
+await drizzlePostgres(db, { connection: "postgres://..." }); // TypeScript error
+await drizzlePostgres(db, { client: somePool });             // TypeScript error
+await drizzlePostgres("postgres://..." as never);            // TypeScript error
+```
+
+JavaScript callers hit the same refusals at runtime, before any dispatch. No
+error message ever contains your connection string.
+
+## What the bridge does not change (honest boundaries)
+
+- **Errors.** Only the bridge's pre-execution validation uses dbSDK error
+  conventions (`DbError`, code `CONFIGURATION`). Queries, transactions, and
+  batches executed *through the returned Drizzle instance* surface native
+  Drizzle/driver errors — they are not normalized into `DbError`, and dbSDK's
+  indeterminate-write semantics do not extend to Drizzle's executor.
+- **Lifetime.** `db.close()` ends the pool. A previously returned Drizzle
+  instance then fails on use (the pool was ended) and is never recreated. For
+  Neon HTTP there is no pool to end, so a previously returned instance keeps
+  working after close — there is simply nothing to release.
+- **Prepared statements.** Over TCP, Drizzle may use its own prepared
+  statements; dbSDK's "no named prepared statements" invariant applies to
+  dbSDK's own executor, not to Drizzle's. Over Neon HTTP there are no
+  prepared statements at all.
+- **Neon HTTP limits** are the driver's, unchanged: no interactive
+  transactions (`db.transaction` on the Drizzle instance throws), no session
+  state, no automatic WebSocket fallback, no retry. Use dbSDK's `db.batch` for
+  atomic multi-statement writes, or a transaction transport on the adapter for
+  dbSDK-level transactions.
+
+## What is next
+
+The next workflow unit is the migration lifecycle: provision via
+[management](/docs/management), get the connection string, generate and apply
+schema with drizzle-kit (`generate`/`push`, dev-time CLI) and
+`drizzle-orm/migrator`'s `migrate()` over this same bridge, then seed. This
+page will show that end-to-end when it lands.

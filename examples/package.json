@@ -15,6 +15,10 @@
     "management:fixture": "tsx 06-management-fixture.ts",
     "management:neon": "tsx 07-management-neon-flow.ts",
     "management:supabase": "tsx 08-management-supabase-flow.ts",
+    "sync": "tsx 09-resumable-transfer.ts",
+    "sync:local": "DBSDK_SYNC_URL=postgresql://postgres:dbsdk@localhost:15432/dbsdk tsx 09-resumable-transfer.ts",
+    "drizzle": "DBSDK_DRIZZLE_OFFLINE=1 tsx 10-drizzle-interop.ts",
+    "drizzle:local": "tsx 10-drizzle-interop.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
@@ -26,6 +30,7 @@
   "devDependencies": {
     "@types/express": "^5.0.3",
     "@types/node": "^26.6.4",
+    "drizzle-orm": "file:../packages/dbsdk/node_modules/drizzle-orm",
     "tsx": "^4.20.0",
     "typescript": "^5.9.0"
   }

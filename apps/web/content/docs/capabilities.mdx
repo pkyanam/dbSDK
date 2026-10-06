@@ -15,14 +15,14 @@ own table below.
 
 ## The matrix
 
-| Capability | postgres (TCP) | supabase direct | supabase session | supabase transaction | neon http | neon + websocket tx | neon + postgres tx |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| Transport | tcp | tcp | tcp | tcp | http | http (queries) | http (queries) |
-| Parameterized `query()` | yes | yes | yes | yes | yes | yes | yes |
-| Interactive `transaction()` | yes | yes | yes | yes, one leased connection | refused before dispatch | yes, short-lived WebSocket pool per transaction | yes, `pg` pool against the direct endpoint |
-| Atomic `batch()` | yes | yes | yes | yes | yes, native single HTTP round trip | yes | yes |
-| Session state | on a leased session | on a leased session | on a leased session | guarded before dispatch | no | no on pooled hosts, yes on direct | no on pooled hosts, yes on direct |
-| Reusable named prepared statements | no | no | no | no | no | no | no |
+| Capability | postgres (TCP) | supabase direct | supabase session | supabase transaction | planetscale direct | planetscale pooled | neon http | neon + websocket tx | neon + postgres tx |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Transport | tcp | tcp | tcp | tcp | tcp | tcp | http | http (queries) | http (queries) |
+| Parameterized `query()` | yes | yes | yes | yes | yes | yes | yes | yes | yes |
+| Interactive `transaction()` | yes | yes | yes | yes, one leased connection | yes | yes, one leased connection | refused before dispatch | yes, short-lived WebSocket pool per transaction | yes, `pg` pool against the direct endpoint |
+| Atomic `batch()` | yes | yes | yes | yes | yes | yes | yes, native single HTTP round trip | yes | yes |
+| Session state | on a leased session | on a leased session | on a leased session | guarded before dispatch | on a leased session | guarded before dispatch | no | no on pooled hosts, yes on direct | no on pooled hosts, yes on direct |
+| Reusable named prepared statements | no | no | no | no | no | no | no | no | no |
 
 Status words used in this table and in code:
 
@@ -35,6 +35,13 @@ Status words used in this table and in code:
   pooler, because that pooler cannot carry them. Disable with
   `enforceSessionRestrictions: false` if you know your deployment allows it.
 - **not supported**: the capability does not exist for that transport.
+
+The two PlanetScale Postgres columns share the Supabase transaction pooler's
+guard semantics on the pooled path (6432, PgBouncer), plus the adapter's
+mandatory verified-TLS policy and explicit direct/pooled port validation —
+details and evidence in the [PlanetScale Postgres adapter](/docs/adapters/planetscale).
+If you use Drizzle ORM, the optional `dbsdk/drizzle` bridge preserves exactly
+these guarantees on the same pool; see [Drizzle](/docs/drizzle).
 
 ## What "session state" means here
 
@@ -84,14 +91,15 @@ Every capability carries an evidence level, also exposed at runtime in
 The current runtime levels are conservative and deliberately so: the
 `postgres` adapter declares `tests` (its behavior is verified by this
 project's automated tests against a real local Postgres 17 container), while
-the Supabase and Neon adapters declare `docs` for every capability - their
-transport facts come from provider documentation. The local verification
-runs are real and reproducible: a local Postgres 17 container, the Neon HTTP
-protocol through a local proxy, and the Supabase adapter against a local
-server exercised the transaction-pooler path (commands below and in
+the Supabase, Neon, and PlanetScale adapters declare `docs` for every
+capability - their transport facts come from provider documentation. The local
+verification runs are real and reproducible: a local Postgres 17 container,
+the Neon HTTP protocol through a local proxy, and the Supabase and PlanetScale
+adapters against a local server exercised the transaction-pooler paths
+(commands below and in
 [CONTRIBUTING](https://github.com/pkyanam/dbSDK/blob/main/CONTRIBUTING.md)).
-Hosted Supabase and Neon projects have not been queried by this project, and
-no table on this site claims otherwise.
+Hosted Supabase, Neon, and PlanetScale endpoints have not been queried by this
+project, and no table on this site claims otherwise.
 
 ## The runtime surface
 
@@ -119,15 +127,30 @@ declared by the adapter and enforced before dispatch. The structured
 source at runtime is `describeManagementCapabilities(adapter)` from
 `dbsdk/management`; docs and grids render from it.
 
-| Capability | Neon management | Supabase management |
-| --- | --- | --- |
-| `project` create/list/get | yes | yes |
-| `project` update/delete | yes | yes |
-| `branch` lifecycle | yes; writes are async operations | yes (the Environments API); branch create is synchronous |
-| `database` | yes; branch-scoped, addressed by name | refused (`CAPABILITY`): a Supabase project is the database |
-| Pagination | projects and branches; not the database list | none |
-| Async operations | yes; `wait()` polls the operations endpoint | none; `wait()` polls resource status |
-| Credential | Neon API key | Supabase personal access token (`sbp_...`) |
+| Capability | Neon management | Supabase management | PlanetScale management |
+| --- | --- | --- | --- |
+| `project` create/list/get | yes | yes | yes (PlanetScale's **database** is the `project` kind) |
+| `project` update/delete | yes | yes | yes |
+| `branch` lifecycle | yes; writes are async operations | yes (the Environments API); branch create is synchronous | create/delete; branch **update refused** (official PATCH unverified — not guessed) |
+| `database` | yes; branch-scoped, addressed by name | refused (`CAPABILITY`): a Supabase project is the database | refused (`CAPABILITY`): a PlanetScale database is the `project` kind |
+| `role`, `endpoint`, `snapshot` | yes: branch-scoped role credentials; compute with start/suspend/restart; snapshots with restore | no such kinds in the official API | `role` only: Postgres role credentials, scoped to a database + branch, addressed by uid |
+| Organizations / regions | yes; `regions()` forwards a supplied `organizationId` as `org_id` | yes; `regions()` requires `organizationId` | yes; all CRUD is organization-scoped (factory `organization` is the required owner); discovery may target other orgs |
+| `connection(ref)` | yes; database and role name required by the official endpoint; redacted unless `reveal: true` | yes; project and branch; redacted unless `reveal: true` | yes; project, branch, and role; always redacted — one-time role passwords surface only via `secrets`, never via `connection()` |
+| Lifecycle actions | endpoint `start`/`suspend`/`restart`; `restore` on branch and snapshot | project `pause`/`restart`/`resume` (resume = the official un-pause restore); branch `reset`/`restore` (restore cancels a scheduled deletion) | none declared: no pause/restart-style endpoints exist for PlanetScale Postgres |
+| `resetCredential(ref)` | yes for `role` (server-generated) | yes for `project` (generated when omitted; the create-time password cannot be recovered, only rotated) | yes for `role` (server-generated; caller passwords refused with zero requests; `raw.renewRole` extends expiration) |
+| Recover deleted project | yes (`raw.recoverProject`) | no such endpoint | no such endpoint |
+| Pagination | projects and branches; not the database list | none | page-based on all implemented lists; `limit` above the official max of 100 is refused |
+| Async operations | yes; `wait()` polls the operations endpoint | none; `wait()` polls resource status | none; `wait()` polls resource status (`project`, `branch`, `role` all expose readiness) |
+| Credential | Neon API key | Supabase personal access token (`sbp_...`) | PlanetScale service token (`tokenId` + `tokenSecret`; `Authorization: <id>:<secret>`, no Bearer) |
+
+Not covered (official endpoints exist, not implemented, never claimed as
+supported): Supabase backups/PITR restore and the project health, read
+replica, and config endpoints; Neon single-org detail, branch
+`set_as_default`, backup schedules, and restricted actions; PlanetScale
+branch PATCH, backups/restore, deploy requests, IP restrictions, and
+bouncers. Vitess/MySQL and the Neki preview are separate systems this
+adapter family does not model. The full remaining-gap list lives in the
+release coordination notes.
 
 Evidence for the management facts is `docs`: the behavior comes from the
 providers' official API documentation and the frozen management contract,
@@ -157,7 +180,11 @@ DBSDK_TEST_NEON_HTTP_ENDPOINT='http://localhost:14444/sql' \
 pnpm --filter dbsdk test
 ```
 
-The verified state at the time of writing: 355 passed, 0 failed, 3
-skipped with the live environment running (342 of those pass fully
-offline; the 16 environment-dependent live checks skip without
-credentials).
+The suite has three layers. Offline tests run against fixtures and fake
+provider transports, so they need no database and no network. The
+live-local checks connect to the real servers started above (a local
+PostgreSQL over the standard wire protocol, and a local Neon-compatible
+HTTP proxy) and skip automatically when those servers are not running or
+their environment variables are not set. Hosted checks that use real
+provider credentials are a separate opt-in layer outside the default run,
+so a local pass never certifies a hosted endpoint.

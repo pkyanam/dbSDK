@@ -29,11 +29,72 @@ does not yet publish to npm; versions below describe the source tree.
   spec `region` mapped to `region_selection`, generated database passwords
   returned once via `secrets`, and host/branch credential retrieval through
   `raw.databaseHost` / `raw.branchConfig`.
+- **PlanetScale Postgres adapters** (`dbsdk/planetscale`,
+  `dbsdk/management/planetscale`), independently accepted by review:
+  a thin query adapter over the shared PostgreSQL engine with mandatory
+  verified TLS on remote hosts (connection-string SSL directives
+  canonicalized and stripped so `pg` cannot override the resolved policy;
+  explicit `ssl: { rejectUnauthorized: false }` is the only downgrade path),
+  validated direct/pooled modes (5432/6432) with the transaction-pooler
+  session-state guards on the pooled path, and a management adapter over the
+  official PlanetScale API (service-token auth as
+  `Authorization: <id>:<secret>`, organization-scoped CRUD with the
+  database-as-`project` mapping, a per-mutation engine preflight that
+  refuses non-PostgreSQL databases before the mutation, `cluster_size`
+  required at create, unfiltered `raw.clusterSizeSkus`, page-based
+  pagination refusing limits above the official max of 100, one-time role
+  passwords surfaced only via `secrets`, and `resetCredential` /
+  `raw.renewRole`). Vitess/MySQL and Neki are refused, not approximated.
+  Evidence: official docs plus offline/local-PG tests; no hosted
+  PlanetScale endpoint was exercised.
+- **Drizzle ORM interop (`dbsdk/drizzle`)**, independently accepted by
+  review: optional bridge factories `drizzlePostgres` / `drizzleNeonHttp`
+  hand Drizzle's stable drivers a validated, dbSDK-owned connection (typed
+  schema queries, joins, relational queries, transactions on the same pool,
+  with lifetime, TLS posture, and pooler guards preserved). Refusals fire
+  before any pool creation or raw access; the missing-peer error is
+  actionable and DSN-free. Native Drizzle/driver errors surface as-is (no
+  unified-error claim); no Studio/Kit/seed/migrations claims.
 - Documentation: new Management, Credentials, and MCP server pages; the
   homepage compatibility table, agent links, and a Sponsors section;
-  `.github/FUNDING.yml`.
+  `.github/FUNDING.yml`. Added since: the Sync page, the Drizzle interop
+  page, and the PlanetScale Postgres adapter page, with the provider
+  capability grids extended accordingly.
 - Runnable management examples under `examples/` that run offline through
   injectable fetch fixtures and the management fixture.
+- **Sync plane (`dbsdk/sync`).** One-way resumable transfer between
+  databases through `runTransfer` with `createSqlSource` /
+  `createSqlTarget` and `createMemoryCheckpointStore`: keyset-paginated
+  reads, chunked `INSERT ... ON CONFLICT` upserts under the 65,535
+  parameter protocol limit, caller-owned checkpoints, cancellation, and
+  failure results that preserve the original error and the last committed
+  cursor. Explicit stable `identity` is required on both adapters;
+  `uniqueOrder: "verify"` (default) checks the unique-index and NOT NULL
+  preconditions with read-only catalog queries before any write, and
+  cursor values use exact PostgreSQL text rendering (microsecond
+  timestamps safe). The copied payload is value-faithful by default:
+  date/time, interval, `json`/`jsonb`, array-over-those columns, and
+  numeric-family arrays (`numeric[]`/`decimal[]`, domains over `numeric`,
+  multidimensional arrays — the driver parses numeric *array elements* as
+  binary doubles) are delivered as their exact `col::text` rendering
+  (microsecond timestamps, JSON arrays and JSON null survive verbatim, every
+  `numeric[]` digit survives; lossless columns keep native JS values), and
+  the target encodes JavaScript array values by resolved column type,
+  refusing ambiguous cases loudly before any write. Reads project an
+  explicit, table-qualified column list frozen from the metadata cached on
+  the first read (never `SELECT *`) and re-validate that schema snapshot
+  against the catalog on every later read, so a column added, removed, or
+  retyped after the first read fails with `CONTRACT` before the data query
+  (recreate the source to pick up the new schema; the checkpoint stays
+  valid). The default checkpoint key is an injective encoding of both
+  identities (`dbsdk.sync:v1:[...]`), so delimiter-like identities cannot
+  share a key, and real columns colliding with the internal
+  `__dbsdk_cursor_*` aliases are refused before any read. Not provided:
+  delete propagation, CDC, bidirectional sync, cross-provider transactions,
+  schema translation.
+- Runnable resumable-transfer example (`examples/09-resumable-transfer.ts`)
+  that runs fully offline and, with a local PostgreSQL, end to end through
+  two independent clients and schemas.
 
 ### Changed
 

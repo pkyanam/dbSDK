@@ -63,17 +63,30 @@ await check('dbsdk/management/neon loads and validates options without network',
   const { createManagement } = await import(dist('management/index.js'));
   const client = createManagement({ adapter });
   if (client.providerId !== 'neon') throw new Error('bad providerId');
-  const descriptor = m.describeManagementCapabilities ? null : null;
-  if (adapter.capabilities.statusPolling === undefined || String(adapter.capabilities.statusPolling) !== 'branch') {
-    throw new Error(`statusPolling not declared: ${adapter.capabilities.statusPolling}`);
+  // A4: endpoint compute lives on the Neon adapter, so wait() also polls endpoint
+  // status alongside branch status. Update this list with the adapter, not ad hoc.
+  const declared = adapter.capabilities.statusPolling;
+  const expected = ['branch', 'endpoint'];
+  if (
+    !Array.isArray(declared) ||
+    expected.some((kind) => !declared.includes(kind)) ||
+    declared.length !== expected.length
+  ) {
+    throw new Error(`statusPolling not declared as [${expected.join(',')}]: ${JSON.stringify(declared)}`);
   }
 });
 
 await check('dbsdk/management/supabase loads and validates options without network', async () => {
   const m = await import(dist('management/supabase.js'));
   const adapter = m.supabaseManagement({ accessToken: 'sbp_test', fetch: async () => new Response('null', { status: 200 }) });
-  if (String(adapter.capabilities.statusPolling) !== 'project,branch') {
-    throw new Error(`statusPolling not declared: ${adapter.capabilities.statusPolling}`);
+  const declared = adapter.capabilities.statusPolling;
+  const expected = ['project', 'branch'];
+  if (
+    !Array.isArray(declared) ||
+    expected.some((kind) => !declared.includes(kind)) ||
+    declared.length !== expected.length
+  ) {
+    throw new Error(`statusPolling not declared as [${expected.join(',')}]: ${JSON.stringify(declared)}`);
   }
   if (adapter.capabilities.resourceKinds.includes('database')) throw new Error('database must not be a Supabase kind');
 });
@@ -81,6 +94,96 @@ await check('dbsdk/management/supabase loads and validates options without netwo
 await check('dbsdk/postgres adapter subpath loads (query smoke only with a server)', async () => {
   const m = await import(dist('adapters/postgres.js'));
   if (typeof m.postgres !== 'function') throw new Error('missing postgres factory');
+});
+
+await check('dbsdk/sync exports the full contract surface', async () => {
+  const s = await import(dist('sync/index.js'));
+  for (const name of [
+    'runTransfer',
+    'createMemoryCheckpointStore',
+    'createSqlSource',
+    'createSqlTarget',
+    'SyncError',
+    'isSyncError',
+  ]) {
+    if (typeof s[name] !== 'function') throw new Error(`missing ${name}`);
+  }
+});
+
+await check('dbsdk/sync SQL adapters validate identifiers before any query (from dist)', async () => {
+  const s = await import(dist('sync/index.js'));
+  const noQueries = { adapterId: 'smoke', query: async () => ({ rows: [], rowCount: 0 }) };
+  try {
+    s.createSqlSource({ db: noQueries, table: ['public', 'evil"]; drop'], orderBy: 'id', identity: 'smoke:src' });
+    throw new Error('invalid identifier was accepted');
+  } catch (error) {
+    if (!s.isSyncError(error) || error.code !== 'CONFIGURATION') throw error;
+  }
+  const nothingRan = noQueries.query.calls === undefined;
+  if (!nothingRan) throw new Error('query was dispatched despite construction failure');
+});
+
+await check('dbsdk/sync runs a full transfer from dist (memory checkpoint store)', async () => {
+  const s = await import(dist('sync/index.js'));
+  // A tiny fake source db: one page of two rows, then exhausted. Rows never
+  // leave the process; no driver is needed. The rows carry the internal
+  // cursor alias (__dbsdk_cursor_0) the source projects and strips. The
+  // column-metadata catalog query (pg_attribute) runs in BOTH uniqueOrder
+  // modes (it drives the exact-payload projection and the reserved-alias
+  // guard), so the fake answers it too; uniqueOrder: 'assume' skips only the
+  // unique-index check (example 09 and the test suite cover 'verify').
+  let reads = 0;
+  const sourceDb = {
+    adapterId: 'smoke-src',
+    query: async (statement) => {
+      if (/pg_attribute/.test(statement.text)) {
+        return {
+          rows: [{ attname: 'id', attnotnull: true, basecategory: 'N', basetypname: 'int4', elemcategory: null, elemtypname: null }],
+          rowCount: 1,
+        };
+      }
+      reads += 1;
+      return reads === 1
+        ? { rows: [{ id: 1, __dbsdk_cursor_0: '1' }, { id: 2, __dbsdk_cursor_0: '2' }], rowCount: 2 }
+        : { rows: [], rowCount: 0 };
+    },
+  };
+  const inserted = [];
+  const targetDb = {
+    adapterId: 'smoke-dst',
+    query: async (statement) => {
+      // Rows arrive as bound parameters, never as SQL text.
+      inserted.push(...statement.params);
+      return { rows: [], rowCount: statement.params.length };
+    },
+  };
+  const source = s.createSqlSource({
+    db: sourceDb,
+    table: ['public', 'events'],
+    orderBy: 'id',
+    identity: 'smoke:src.public.events',
+    uniqueOrder: 'assume',
+  });
+  const target = s.createSqlTarget({ db: targetDb, table: ['public', 'events'], key: 'id', identity: 'smoke:dst.public.events' });
+  const result = await s.runTransfer(source, target, { batchSize: 2 });
+  if (result.status !== 'completed' || !result.exhausted) {
+    throw new Error(`unexpected result: ${JSON.stringify({ status: result.status, exhausted: result.exhausted, error: result.error })}`);
+  }
+  if (result.rowsRead !== 2 || result.rowsWritten !== 2 || result.batches !== 1) {
+    throw new Error(`unexpected counts: ${JSON.stringify(result)}`);
+  }
+  if (JSON.stringify(inserted) !== '[1,2]') throw new Error(`unexpected params: ${JSON.stringify(inserted)}`);
+});
+
+await check('dbsdk/sync refuses a missing identity before any dispatch (R3 contract)', async () => {
+  const s = await import(dist('sync/index.js'));
+  const noQueries = { adapterId: 'smoke', query: async () => ({ rows: [], rowCount: 0 }) };
+  try {
+    s.createSqlSource({ db: noQueries, table: ['public', 'events'], orderBy: 'id' });
+    throw new Error('missing identity was accepted');
+  } catch (error) {
+    if (!s.isSyncError(error) || error.code !== 'CONFIGURATION') throw error;
+  }
 });
 
 if (process.env.DBSDK_TEST_POSTGRES_URL) {

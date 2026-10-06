@@ -3,7 +3,8 @@
  *
  * This entry exports the core client, the SQL builder, the contract types, and the normalized
  * error type. Adapter implementations stay behind their own subpaths (`dbsdk/postgres`,
- * `dbsdk/supabase`, `dbsdk/neon`) so no driver is pulled in unless you import it.
+ * `dbsdk/supabase`, `dbsdk/neon`, `dbsdk/planetscale`) so no driver is pulled in unless you
+ * import it.
  *
  * @example
  * ```ts
@@ -49,21 +50,27 @@ export type {
   FetchLike,
   KnownManagementProviderId,
   KnownManagementResourceKind,
+  ManagementActionOptions,
   ManagementAdapter,
   ManagementAdapterCapabilities,
   ManagementCallOptions,
   ManagementClient,
+  ManagementConnectionInfo,
+  ManagementConnectionInput,
   ManagementDeleteResult,
   ManagementListQuery,
   ManagementOperation,
+  ManagementOrganization,
   ManagementPage,
   ManagementProviderId,
+  ManagementRegion,
   ManagementResource,
   ManagementResourceKind,
   ManagementScope,
   ManagementSecret,
   ManagementStatus,
   ManagementWriteResult,
+  ResetCredentialOptions,
   ResourceRef,
   UpdateResourceSpec,
   WaitOptions,

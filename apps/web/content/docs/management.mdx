@@ -2,14 +2,17 @@
 title: Management
 description: The control plane. Create, inspect, update, and delete provider resources with one verb set, then bridge to the query client.
 sidebar:
-  order: 12
+  order: 13
 ---
 
 The management layer is dbSDK's control plane. You bring a provider
-credential (a Supabase personal access token or a Neon API key) and get one
+credential (a Supabase personal access token, a Neon API key, or a
+PlanetScale service token) and get one
 stable verb set over the provider's resources: `create`, `list`, `get`,
-`update`, `delete`, and `wait`. It is the provisioning and lifecycle half of
-dbSDK; the query client is the other half.
+`update`, `delete`, and `wait`, plus discovery (`organizations`,
+`regions`), connection retrieval (`connection`), lifecycle `action`s, and
+`resetCredential`. It is the provisioning and lifecycle half of dbSDK; the
+query client is the other half.
 
 What it is not, stated plainly: there is no central dbSDK backend, no
 credential proxying, no automatic retry or replay of create or delete, and
@@ -35,6 +38,11 @@ const management = createManagement({
 | `update(spec)` | Patches a resource (per-kind availability). |
 | `delete(ref)` | Deletes a resource (per-kind availability). |
 | `wait(target)` | Polls until a write finishes; GET requests only. |
+| `organizations()` | Lists organizations (the create-project prerequisite on the providers). |
+| `regions(input?)` | Lists deployable regions; Supabase requires `organizationId`. |
+| `connection(ref, input?)` | Returns provider connection details; passwords redacted unless `reveal: true`. |
+| `action(ref, action, options?)` | Runs a declared lifecycle action (pause, restart, resume, reset, restore, start, suspend). |
+| `resetCredential(ref, options?)` | Rotates a credential; the new password appears only in `secrets`. |
 
 Every call is checked against the adapter's declared capabilities **before
 dispatch**: an unsupported kind, verb, or pagination argument fails with a
@@ -118,20 +126,38 @@ connection string shape from those parts and hand it to the query adapter.
 A personal access token never acts as a database password, and the SDK
 never fabricates a URL from it.
 
+Once you hold a connection string, you can also hand the dbSDK-owned
+database to Drizzle ORM through `dbsdk/drizzle` on the same pool — see
+[Drizzle](/docs/drizzle).
+
 ## Resources and scope
 
 Resource kinds are a shared vocabulary, normalized across providers, with
 honest per-provider limits:
 
-- `project`: the top-level unit on both providers. A Supabase project *is*
+- `project`: the top-level unit on the providers. A Supabase project *is*
   the PostgreSQL database; a Neon project contains branches that carry
-  databases.
+  databases; on PlanetScale, the **database** (the managed, billable unit)
+  *is* the `project` kind.
 - `branch`: a Neon branch. Neon branch writes are asynchronous; the result
-  carries the provider operations that `wait()` polls.
+  carries the provider operations that `wait()` polls. PlanetScale branches
+  are scoped to the database's name slug, addressed by name.
 - `database`: a logical PostgreSQL database. Neon-scoped to a branch and
   addressed by name, exactly as Neon's API does it. Supabase has no such
   resource: `create({ kind: "database" })` on Supabase is refused with
-  `CAPABILITY` because there is nothing for it to create.
+  `CAPABILITY` because there is nothing for it to create. PlanetScale
+  refuses it for the opposite reason: its database is already the `project`
+  kind, so there is no separate `database` resource beneath it.
+- Provider-defined kinds: Neon adds `role` (branch-scoped Postgres role
+  credentials), `endpoint` (a branch compute, with `start` / `suspend` /
+  `restart` actions), and `snapshot` (a branch snapshot, restorable to a
+  branch). PlanetScale adds `role`: Postgres role credentials scoped to
+  `{ projectId, branchId }` (database slug + branch name) and addressed by
+  uid. They exist only where the provider's official API defines them;
+  there is no Supabase `role`, `endpoint`, or `snapshot` equivalent in its
+  management API. Neon has no single snapshot `get`: the official API
+  offers only create, list, update, delete, and restore, and `get` on a
+  snapshot is refused with `CAPABILITY` saying exactly that.
 
 The kind set is open: a provider adapter can declare its own kinds (with
 required scope fields in its capabilities), so a future adapter for a
@@ -175,26 +201,33 @@ const management = createManagement({ adapter });
 console.log(describeManagementCapabilities(adapter));
 // {
 //   providerId: "neon",
-//   resourceKinds: ["project", "branch", "database"],
-//   operations: { create: [...], list: [...], get: [...], update: [...], delete: [...] },
+//   resourceKinds: ["project", "branch", "database", "role", "endpoint", "snapshot"],
+//   operations: { create: [...], list: [...], get: [...], update: [...], delete: [...],
+//                 connection: [...], resetCredential: [...] },
+//   actions: { start: [...], suspend: [...], restart: [...], restore: [...] },
 //   pagination: true,
 //   asyncOperations: true,
-//   statusPolling: ["branch"],
+//   statusPolling: ["branch", "endpoint"],
 //   prerequisites: { ... },
-//   resourceScopes: {},
+//   resourceScopes: { ... },
 //   evidence: { "create:project": "docs", ... }
 // }
 ```
 
-| | Neon (`neonManagement`) | Supabase (`supabaseManagement`) |
-| --- | --- | --- |
-| Create project | yes; `name` required, `region` and `organizationId` optional; no plan and no caller password (Neon generates the role password) | yes; `name` and an organization scope required (`organizationId` or `providerOptions.organization_slug`; the API's `organization_id` is deprecated). A spec `plan` is refused with `CONFIGURATION`: the plan is chosen at the organization level |
-| Branches | yes; `projectId` required, creation is async, a read-write compute is added by default | yes (the Environments API); branch create is synchronous |
-| Databases | yes; `projectId` + `branchId` + `name` + `owner` required; branch-scoped, addressed by name | refused: the project is the database |
-| Update / delete | per kind, all declared kinds | yes for `project` and `branch` |
-| Pagination | projects and branches paginate; the database list does not | no server-side pagination anywhere |
-| Async operations | yes; `wait()` polls the operations endpoint | no operations endpoint; `wait()` polls resource status |
-| Credential | Neon API key | Supabase personal access token (`sbp_...`) |
+| | Neon (`neonManagement`) | Supabase (`supabaseManagement`) | PlanetScale (`planetscaleManagement`) |
+| --- | --- | --- | --- |
+| Create project | yes; `name` required, `region` and `organizationId` optional; no plan and no caller password (Neon generates the role password) | yes; `name` and an organization scope required (`organizationId` or `providerOptions.organization_slug`; the API's `organization_id` is deprecated). A spec `plan` is refused with `CONFIGURATION`: the plan is chosen at the organization level | yes; `name` and `providerOptions.cluster_size` required (official API); the factory `organization` is the required owner and a mismatching `spec.organizationId` is refused with zero dispatch; no plan field and no create-time password — credentials come from roles |
+| Branches | yes; `projectId` required, creation is async, a read-write compute is added by default | yes (the Environments API); branch create is synchronous | yes; `projectId` (the database name slug) + `name` required; create is synchronous; branch **update is refused** (the official PATCH endpoint exists but was not verified — not guessed) |
+| Databases | yes; `projectId` + `branchId` + `name` + `owner` required; branch-scoped, addressed by name | refused: the project is the database | refused: the database *is* the `project` kind |
+| Roles / compute / snapshots | yes: `role` (branch-scoped credentials), `endpoint` (compute with start/suspend/restart), `snapshot` (create/list/update/delete/restore); no single snapshot get (the official API has none) | no such kinds in the official API | `role` only: Postgres role credentials scoped to a database + branch, addressed by uid; every mutating verb first GETs the parent database and refuses non-PostgreSQL parents before the mutation (the engine gate) |
+| Connection details | `connection(ref, { databaseName, roleName, pooled?, reveal? })`; database name and role name are required by the official endpoint, never guessed | `connection(ref, { pooled?, reveal? })`; a direct project connection exposes the host (the official payload carries no database/role fields) | `connection(ref)` for `project`, `branch`, or `role`: resolves the official host and role username; the URI is always redacted — role passwords are one-time secrets and `connection()` never fabricates one |
+| Lifecycle actions | `start`/`suspend`/`restart` on an endpoint; `restore` on a branch or snapshot | `pause`, `restart`, `resume` on a project; `reset` and `restore` on a branch | none declared: PlanetScale Postgres has no pause/restart-style lifecycle endpoints, so every `action()` is refused with `CAPABILITY` |
+| Credential rotation | `resetCredential({kind:'role'})`: server-generated, caller password refused; `raw.revealRolePassword` re-reveals a role password | `resetCredential({kind:'project'})`: adapter-generated password when omitted, returned once via `secrets` | `resetCredential({kind:'role'})`: server-generated, caller password refused; `raw.renewRole` extends a role's expiration without generating a password |
+| Recover deleted project | `raw.recoverProject(id)` (official endpoint) | no such endpoint: deleted projects are gone | no such endpoint |
+| Update / delete | per kind, all declared kinds | yes for `project` and `branch` | update: `project` and `role`; delete: `project`, `branch`, `role` |
+| Pagination | projects and branches paginate; the database list does not | no server-side pagination anywhere | page-based on all implemented lists; a `limit` above the official maximum of 100 is refused before dispatch |
+| Async operations | yes; `wait()` polls the operations endpoint | no operations endpoint; `wait()` polls resource status | no operations endpoint; `wait()` polls resource status (`project`, `branch`, and `role` all expose readiness) |
+| Credential | Neon API key | Supabase personal access token (`sbp_...`) | PlanetScale service token (`tokenId` + `tokenSecret`; sent as `Authorization: <id>:<secret>`, no Bearer scheme) |
 
 Availability in this table means "implemented and declared". It never
 certifies your credentials, your plan tier, or that a specific live request
@@ -210,7 +243,55 @@ it. A spec `region` is still accepted and mapped to the official
 form is supported alongside `providerOptions: { organization_slug }`.
 Region codes come from the provider's own endpoint
 (`GET /v1/projects/available-regions`); the adapter's `prerequisites`
-state the current requirements.
+state the current requirements. Region discovery works the same way on
+the providers through `regions()`: Supabase requires the organization
+scope, Neon forwards a supplied `organizationId` to the official endpoint
+as `org_id` (optional, but Neon recommends it for accurate availability).
+
+## Actions, connections, and credentials
+
+`action(ref, name, options?)` runs an officially declared lifecycle
+mutation. Every action name/kind pair is capability-gated before dispatch.
+Two semantics worth reading twice, because the names do not say what you
+might guess:
+
+- **Supabase `action(project, 'resume')` is the un-pause primitive.** It
+  calls the official `POST /v1/projects/{ref}/restore` (the endpoint the
+  dashboard's "Resume project" button uses, scope `projects:write`). The
+  endpoint echoes no resource or operation, so `wait()` on the action
+  result is refused by design; poll `get()` / `wait(project)` while the
+  status moves through `RESTORING` back to active.
+- **Supabase `action(branch, 'restore')` cancels a scheduled branch
+  deletion.** It is not point-in-time data restore; the backups/PITR
+  family is the one thing this adapter does not cover on Supabase yet.
+- **Neon has no project pause or resume.** Scale-to-zero is per-compute:
+  `action({kind:'endpoint'}, 'suspend')` and `'start'`. A Neon branch
+  restore accepts `preserveUnderName` when required by Neon (children or
+  self-source); unknown input keys are refused with `CONFIGURATION`
+  instead of being silently dropped.
+- **PlanetScale Postgres declares no lifecycle actions at all.** There are
+  no pause/restart-style endpoints for its databases, branches, or roles,
+  so any `action()` call is refused with `CAPABILITY` before dispatch
+  rather than guessed from an unverified endpoint.
+
+`connection(ref, input?)` returns provider-selected connection details:
+host, port, database, role, pooled flag, and a redacted URI. Any password
+segment is redacted by default; `reveal: true` is the explicit opt-in that
+returns the credential only in `secrets` and additionally registers it for
+redaction in later error messages. Nothing is fabricated: fields the
+provider does not return are `null`. On PlanetScale this is even stricter:
+role passwords are **one-time** secrets issued only by create and
+`resetCredential`, so `connection()` resolves the host and role username but
+can never produce a password, and its URI stays redacted unconditionally.
+
+`resetCredential(ref, options?)` rotates a credential. On Neon, role
+passwords are server-generated and a caller-supplied password is refused
+with `CONFIGURATION`; on Supabase, the adapter generates a cryptographically
+random project password when you omit it; on PlanetScale, role rotation is
+server-generated and `raw.renewRole` extends a role's expiration without
+generating a new password. In all cases the new password appears only in
+`secrets`. Supabase's create-time password cannot be recovered, only
+rotated; PlanetScale's role passwords are likewise one-time secrets.
 
 ## Create results and secrets
 
@@ -256,11 +337,13 @@ performs no writes.
 One precondition to know: waiting on a bare `ResourceRef` only works for
 kinds whose normalized `status` actually reflects provider lifecycle. Each
 adapter declares which kinds those are (`statusPolling`): Neon's branch
-(the only Neon kind with a status field), and Supabase's project and
-branch. `wait()` on a bare Neon project or database ref is refused before
-dispatch with `CAPABILITY` instead of hanging until the timeout: pass the
-write result or the operation returned by the write, which carries the
-provider operations to poll.
+and endpoint, Supabase's project and branch, and PlanetScale's project,
+branch, and role (role readiness respects terminal/deletion and
+expired/disabled states before any `ready: true`). `wait()` on a bare Neon
+project, database, role, or snapshot ref is refused before dispatch with
+`CAPABILITY` instead of hanging until the timeout: pass the write result
+or the operation returned by the write, which carries the provider
+operations to poll.
 
 ## Errors
 

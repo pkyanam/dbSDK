@@ -1,9 +1,9 @@
 {
   "name": "dbsdk",
   "version": "0.1.0",
-  "description": "One typed SDK to create, manage, and query databases on Supabase and Neon: bring your provider API key, provision and manage resources through the management control plane, and run parameterized SQL. Honest capabilities, normalized errors, no silent failover.",
+  "description": "One typed SDK to create, manage, and query databases on Supabase, Neon, and PlanetScale Postgres: bring your provider API key, provision and manage resources through the management control plane, run parameterized SQL, and use Drizzle ORM over dbSDK connections. Honest capabilities, normalized errors, no silent failover.",
   "type": "module",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "engines": {
     "node": ">=22.12"
   },
@@ -13,6 +13,7 @@
     "postgres",
     "supabase",
     "neon",
+    "planetscale",
     "sql",
     "sdk",
     "typescript",
@@ -23,7 +24,10 @@
   ],
   "sideEffects": false,
   "files": [
-    "dist"
+    "dist",
+    "LICENSE",
+    "NOTICE",
+    "THIRD_PARTY_NOTICES.md"
   ],
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -53,6 +57,21 @@
       "import": "./dist/adapters/neon.js",
       "default": "./dist/adapters/neon.js"
     },
+    "./planetscale": {
+      "types": "./dist/planetscale.d.ts",
+      "import": "./dist/planetscale.js",
+      "default": "./dist/planetscale.js"
+    },
+    "./drizzle": {
+      "types": "./dist/drizzle-interop/index.d.ts",
+      "import": "./dist/drizzle-interop/index.js",
+      "default": "./dist/drizzle-interop/index.js"
+    },
+    "./sync": {
+      "types": "./dist/sync/index.d.ts",
+      "import": "./dist/sync/index.js",
+      "default": "./dist/sync/index.js"
+    },
     "./management": {
       "types": "./dist/management/index.d.ts",
       "import": "./dist/management/index.js",
@@ -72,6 +91,11 @@
       "types": "./dist/management/neon.d.ts",
       "import": "./dist/management/neon.js",
       "default": "./dist/management/neon.js"
+    },
+    "./management/planetscale": {
+      "types": "./dist/management/planetscale.d.ts",
+      "import": "./dist/management/planetscale.js",
+      "default": "./dist/management/planetscale.js"
     }
   },
   "scripts": {
@@ -83,7 +107,8 @@
   },
   "peerDependencies": {
     "pg": "^8.16.0",
-    "@neondatabase/serverless": "^1.2.0"
+    "@neondatabase/serverless": "^1.2.0",
+    "drizzle-orm": "^0.45.3"
   },
   "peerDependenciesMeta": {
     "pg": {
@@ -91,12 +116,16 @@
     },
     "@neondatabase/serverless": {
       "optional": true
+    },
+    "drizzle-orm": {
+      "optional": true
     }
   },
   "devDependencies": {
     "@neondatabase/serverless": "^1.2.0",
     "@types/node": "^26.6.4",
     "@types/pg": "^8.23.1",
+    "drizzle-orm": "^0.45.3",
     "pg": "^8.23.1",
     "tsdown": "^0.23.0",
     "typescript": "^5.9.0",

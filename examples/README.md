@@ -17,9 +17,17 @@ pnpm --filter dbsdk build
 npm install
 ```
 
-`package.json` declares `"dbsdk": "file:../packages/dbsdk"` plus the two
-optional peer drivers (`pg`, `@neondatabase/serverless`), so the install
-picks up a real local build rather than a registry package.
+`package.json` declares `"dbsdk": "file:../packages/dbsdk"` plus the optional
+peer drivers (`pg`, `@neondatabase/serverless`), so the install picks up a
+real local build rather than a registry package.
+
+The Drizzle interop example needs `drizzle-orm` too, and it is pinned to the
+**same physical copy** the workspace package resolves (`"file:../packages/
+dbsdk/node_modules/drizzle-orm"`). That seam is deliberate: the bridge's
+packed types and the example's `pgTable` types must come from ONE
+drizzle-orm instance, or TypeScript treats them as incompatible duplicates.
+It only resolves after the root `pnpm install` + `pnpm --filter dbsdk build`
+have run — follow the order above exactly.
 
 ## Choose an adapter
 
@@ -56,6 +64,45 @@ three run completely offline:
 None of them touches the network or a hosted provider; each file header
 states exactly what is proven and what is not.
 
+## Sync example
+
+- `npm run sync`: `09-resumable-transfer.ts`, fully offline — two fixture
+  clients play provider A and provider B. Real keyset page fixtures drive
+  the SQL source's actual pagination, the target fails batch 2 once with a
+  `08006` connection reset, and a durable file checkpoint store carries
+  progress between the failed run and the resummed run.
+- `npm run sync:local`: the same program against a local PostgreSQL 17
+  (the `dbsdk-pg-test` container on port 15432 — start it with the command
+  in CONTRIBUTING.md). Two independent clients with two schemas play the
+  two providers: initial copy, incremental rerun after a change phase
+  (exactly the new and updated rows move), and an idle rerun (0 rows).
+  Nothing leaves your machine.
+
+What it proves: initial copy and incremental sync are the same primitive;
+a failed run stops with the original error and the last committed cursor;
+reruns converge because the target is an upsert (idempotent data, not
+exactly-once delivery). The offline mode also runs the real
+`uniqueOrder: "verify"` preflight against fixture catalog answers, the
+copied payload is value-faithful (timestamps as exact text), and later
+reads re-validate the cached schema snapshot (schema drift fails loudly).
+What it does not claim: deletes are not propagated, a timestamp watermark
+can miss late-committing updates, and there is no bidirectional sync or
+cross-provider atomicity.
+
+## Drizzle interop example
+
+- `npm run drizzle`: `10-drizzle-interop.ts`, fully offline
+  (`DBSDK_DRIZZLE_OFFLINE=1`) — the bridge's refusals demonstrated without
+  any database: transaction-mode pooler, direction mismatches, DSN/
+  `connection`/`client` configs, and the actionable missing-peer error.
+- `npm run drizzle:local`: the same program against a local PostgreSQL 17
+  — real typed schema queries, joins, a relational query, a committed and a
+  rolled-back transaction, parameter binding, and close semantics; the
+  example drops its own schema afterward.
+
+The example needs the root pnpm install + package build first (see Setup):
+it consumes the workspace's single physical drizzle-orm copy.
+
 ## Run
 
 ```bash
@@ -77,3 +124,10 @@ npm run typecheck      # tsc --noEmit
 - `04-fixture-testing.ts`: unit tests without a database, and their limits.
 - `05-express-server.ts`: process-wide client lifetime, request handling
   with constraint and indeterminate branches, clean shutdown.
+- `09-resumable-transfer.ts`: provider-to-provider resumable transfer
+  through `dbsdk/sync` — keyset source, upsert target, durable file
+  checkpoints, honest failure and resume semantics, value-faithful
+  payloads.
+- `10-drizzle-interop.ts`: Drizzle ORM over a dbSDK-owned connection —
+  typed schema queries on the same pool, refused modes, lifetime kept by
+  the caller.

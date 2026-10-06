@@ -8,10 +8,14 @@ import { expectTypeOf, it } from 'vitest';
 import type {
   CreateCustomSpec,
   CreateResourceSpec,
+  ManagementAdapter,
   ManagementAdapterCapabilities,
   ManagementClient,
+  ManagementConnectionInfo,
   ManagementListQuery,
+  ManagementProviderId,
   ManagementResourceKind,
+  ManagementSecret,
   ResourceRef,
 } from '../../src/management/types.js';
 
@@ -68,4 +72,83 @@ it('declares statusPolling as optional per-kind lists on capabilities', () => {
     prerequisites: {},
   };
   expectTypeOf(capabilities.statusPolling).toEqualTypeOf<readonly ManagementResourceKind[] | undefined>();
+});
+
+// ---------------------------------------------------------------------------
+// Amendment A4 — discovery, connection, actions, credentials
+// ---------------------------------------------------------------------------
+
+it('adds the A4 methods to the client surface as required members', () => {
+  type Client = ManagementClient;
+  expectTypeOf<Client['organizations']>().toBeFunction();
+  expectTypeOf<Client['regions']>().toBeFunction();
+  expectTypeOf<Client['connection']>().toBeFunction();
+  expectTypeOf<Client['action']>().toBeFunction();
+  expectTypeOf<Client['resetCredential']>().toBeFunction();
+});
+
+it('types connection() results as provider-selected-or-null with redacted URIs and opt-in secrets', async () => {
+  type Client = ManagementClient;
+  const fake = { connection: async () => null as unknown as ManagementConnectionInfo } as unknown as Client;
+  const info = await fake.connection(
+    { kind: 'project', id: 'p-1' },
+    { databaseName: 'neondb', roleName: 'app_owner', pooled: true, reveal: true },
+  );
+  expectTypeOf(info.host).toEqualTypeOf<string | null>();
+  expectTypeOf(info.port).toEqualTypeOf<number | null>();
+  expectTypeOf(info.database).toEqualTypeOf<string | null>();
+  expectTypeOf(info.role).toEqualTypeOf<string | null>();
+  expectTypeOf(info.pooled).toEqualTypeOf<boolean | null>();
+  expectTypeOf(info.redactedUri).toEqualTypeOf<string | null>();
+  expectTypeOf(info.secrets).toEqualTypeOf<readonly ManagementSecret[]>();
+  // Callers can narrow the credential out of secrets only after the explicit reveal opt-in.
+  const credential = info.secrets[0];
+  if (credential) expectTypeOf(credential.value).toEqualTypeOf<string>();
+});
+
+it('types A4 capability declarations as optional per-kind tables', () => {
+  const capabilities: ManagementAdapterCapabilities = {
+    resourceKinds: ['project', 'role'],
+    supported: {
+      update: ['project'],
+      delete: ['project', 'role'],
+      connection: ['project'],
+      resetCredential: ['role'],
+      actions: { pause: ['project'], restore: ['snapshot'] },
+    },
+    pagination: false,
+    asyncOperations: false,
+    evidence: {},
+    prerequisites: {},
+  };
+  expectTypeOf(capabilities.supported.connection).toEqualTypeOf<readonly ManagementResourceKind[] | undefined>();
+  expectTypeOf(capabilities.supported.resetCredential).toEqualTypeOf<readonly ManagementResourceKind[] | undefined>();
+  expectTypeOf(capabilities.supported.actions).toEqualTypeOf<
+    Readonly<Record<string, readonly ManagementResourceKind[]>> | undefined
+  >();
+});
+
+it('keeps the A4 adapter methods optional so pre-A4 adapters still typecheck', () => {
+  type Adapter = ManagementAdapter;
+  expectTypeOf<Adapter['organizations']>().toEqualTypeOf<ManagementAdapter['organizations']>();
+  // Absent is still valid: optional members.
+  const partial: Pick<ManagementAdapter, 'id' | 'providerId' | 'capabilities' | 'create' | 'list' | 'get' | 'raw'> & {
+    raw: Record<string, never>;
+  } = {
+    id: 'x',
+    providerId: 'x',
+    capabilities: {
+      resourceKinds: ['project'],
+      supported: { update: [], delete: [] },
+      pagination: false,
+      asyncOperations: false,
+      evidence: {},
+      prerequisites: {},
+    },
+    create: async () => ({ resource: null, operation: null, secrets: [], indeterminate: false }),
+    list: async () => ({ kind: 'project', resources: [], cursor: null }),
+    get: async () => ({ kind: 'project', providerId: 'x', id: 'p', name: null, region: null, status: 'unknown', providerStatus: null, createdAt: null, updatedAt: null, raw: {} }),
+    raw: {},
+  };
+  expectTypeOf(partial.id).toEqualTypeOf<ManagementProviderId>();
 });

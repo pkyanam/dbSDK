@@ -638,3 +638,182 @@ describe('results and metadata', () => {
     expect(describeManagementCapabilities(undeclaredAdapter).statusPolling).toBeUndefined();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Amendment A4 — discovery, connection, action, and resetCredential gating
+// ---------------------------------------------------------------------------
+
+/** A minimal adapter without the optional A4 methods, for construction-time validation tests. */
+function bareAdapter(): ManagementAdapter<{ calls: unknown[] }> {
+  return {
+    id: 'bare',
+    providerId: 'bare',
+    capabilities: {
+      resourceKinds: ['project'],
+      supported: { update: [], delete: [] },
+      pagination: false,
+      asyncOperations: false,
+      evidence: { resourceKinds: 'tests' },
+      prerequisites: {},
+    },
+    async create() {
+      throw new Error('no calls');
+    },
+    async list() {
+      return { kind: 'project', resources: [], cursor: null };
+    },
+    async get() {
+      throw new Error('no calls');
+    },
+    raw: { calls: [] },
+  };
+}
+
+describe('A4 capability gating before dispatch', () => {
+  it('refuses organizations()/regions() when the adapter does not implement them', async () => {
+    // A hand-built adapter without the A4 methods (the fixture implements them).
+    const bare: ManagementAdapter<{ calls: unknown[] }> = {
+      id: 'test',
+      providerId: 'test',
+      capabilities: {
+        resourceKinds: ['project'],
+        supported: { update: [], delete: [] },
+        pagination: false,
+        asyncOperations: false,
+        evidence: { resourceKinds: 'tests' },
+        prerequisites: {},
+      },
+      async create() {
+        throw new Error('no calls');
+      },
+      async list() {
+        return { kind: 'project', resources: [], cursor: null };
+      },
+      async get() {
+        throw new Error('no calls');
+      },
+      raw: { calls: [] },
+    };
+    const client = createManagement({ adapter: bare });
+    const orgError = (await client.organizations().then(
+      () => null,
+      (e) => e,
+    )) as ManagementError;
+    expect(orgError).toBeInstanceOf(ManagementError);
+    expect(orgError.code).toBe('CAPABILITY');
+    expect(orgError.message).toMatch(/organizations is not supported/);
+    const regionError = (await client.regions().then(
+      () => null,
+      (e) => e,
+    )) as ManagementError;
+    expect(regionError.code).toBe('CAPABILITY');
+    expect(bare.raw.calls).toHaveLength(0);
+  });
+
+  it('refuses connection() for kinds not declared in supported.connection (zero requests)', async () => {
+    const { adapter, client } = createManagementFixture({
+      capabilities: {
+        supported: { update: ['project'], delete: ['project'], connection: ['project'] },
+      },
+    });
+    const error = (await client
+      .connection({ kind: 'branch', id: 'b1', projectId: 'p1' }, {})
+      .catch((e) => e)) as ManagementError;
+    expect(error).toBeInstanceOf(ManagementError);
+    expect(error.code).toBe('CAPABILITY');
+    expect(error.message).toContain("Kinds supporting connection: 'project'");
+    expect(adapter.raw.calls).toHaveLength(0);
+  });
+
+  it('rejects adapters that declare supported.connection kinds without implementing connection()', () => {
+    const bare = bareAdapter();
+    (bare.capabilities.supported as { connection?: string[] }).connection = ['project'];
+    expect(() => createManagement({ adapter: bare })).toThrow(
+      /declares supported\.connection kinds but does not implement/,
+    );
+  });
+
+  it('rejects adapters that declare supported.actions without implementing action()', () => {
+    const bare = bareAdapter();
+    (bare.capabilities.supported as { actions?: Record<string, string[]> }).actions = { pause: ['project'] };
+    expect(() => createManagement({ adapter: bare })).toThrow(/declares supported\.actions but does not implement/);
+  });
+
+  it('rejects a malformed supported.actions table at construction', () => {
+    const bare = bareAdapter();
+    (bare.capabilities.supported as { actions?: unknown }).actions = { pause: 'project' };
+    expect(() => createManagement({ adapter: bare })).toThrow(/supported\.actions must be a record/);
+  });
+
+  it('refuses undeclared actions and kinds with zero requests, listing the declared actions', async () => {
+    const { adapter, client } = createManagementFixture({
+      capabilities: {
+        supported: {
+          update: ['project'],
+          delete: ['project'],
+          actions: { pause: ['project'], start: ['endpoint'] },
+        },
+      },
+    });
+    const undeclaredAction = (await client.action({ kind: 'project', id: 'p1' }, 'restart').catch((e) => e)) as ManagementError;
+    expect(undeclaredAction.code).toBe('CAPABILITY');
+    expect(undeclaredAction.message).toContain("'pause'");
+    const wrongKind = (await client
+      .action({ kind: 'endpoint', id: 'ep1', scope: { projectId: 'p1' } }, 'pause')
+      .catch((e) => e)) as ManagementError;
+    expect(wrongKind.code).toBe('CAPABILITY');
+    expect(adapter.raw.calls).toHaveLength(0);
+  });
+
+  it('passes declared actions through to the adapter with the caller input', async () => {
+    const { adapter, client } = createManagementFixture({
+      capabilities: {
+        supported: { update: ['project'], delete: ['project'], actions: { pause: ['project'] } },
+      },
+      handlers: {
+        action: async (ref, action) => ({
+          resource: null,
+          operation: null,
+          secrets: [],
+          indeterminate: false,
+          // echo for assertion
+          ...(ref.id === 'p1' && action === 'pause' ? {} : {}),
+        }),
+      },
+    });
+    const result = await client.action({ kind: 'project', id: 'p1' }, 'pause', { input: { force: true } });
+    expect(result.indeterminate).toBe(false);
+    expect(adapter.capabilities.supported.actions).toEqual({ pause: ['project'] });
+  });
+
+  it('refuses resetCredential for kinds not declared in supported.resetCredential', async () => {
+    const { adapter, client } = createManagementFixture({
+      capabilities: {
+        supported: { update: ['project'], delete: ['project'], resetCredential: ['project'] },
+      },
+    });
+    const error = (await client
+      .resetCredential({ kind: 'branch', id: 'b1', projectId: 'p1' })
+      .catch((e) => e)) as ManagementError;
+    expect(error).toBeInstanceOf(ManagementError);
+    expect(error.code).toBe('CAPABILITY');
+    expect(error.message).toContain("Kinds supporting resetCredential: 'project'");
+    expect(adapter.raw.calls).toHaveLength(0);
+  });
+
+  it('rejects adapters that declare supported.resetCredential without implementing it', () => {
+    const bare = bareAdapter();
+    (bare.capabilities.supported as { resetCredential?: string[] }).resetCredential = ['project'];
+    expect(() => createManagement({ adapter: bare })).toThrow(
+      /declares supported\.resetCredential kinds but does not implement/,
+    );
+  });
+
+  it('describeManagementCapabilities exposes the A4 fields with truthful empty defaults', () => {
+    const { adapter } = createManagementFixture({});
+    const descriptor = describeManagementCapabilities(adapter);
+    expect(descriptor.operations.connection).toEqual([]);
+    expect(descriptor.operations.resetCredential).toEqual([]);
+    expect(descriptor.actions).toEqual({});
+  });
+});

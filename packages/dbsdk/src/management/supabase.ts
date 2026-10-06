@@ -40,6 +40,30 @@
  *   credentials (via `raw.branchConfig`). The caller assembles Supabase's documented direct
  *   connection string (`postgresql://postgres:<password>@<host>:5432/postgres`) and hands it to
  *   the `dbsdk/postgres` adapter. The SDK never fabricates a password or URL from the PAT.
+ *
+ * Amendment A4 expansion (2026-10-06, verified against the official spec):
+ * - `organizations()` (GET /v1/organizations) and `regions()` (GET /v1/projects/available-regions
+ *   — organization-scoped, `organization_slug` is a required query parameter).
+ * - `connection(ref)`: project → GET /v1/projects/{ref} → `database.host` (the official payload
+ *   carries no database/role names — they stay `null`, never invented). With `pooled: true` the
+ *   official GET /v1/projects/{ref}/config/database/pooler supplies the PRIMARY entry's
+ *   `db_host`/`db_port`/`db_user`/`db_name` and its `connection_string`, which embeds a password:
+ *   REDACTED unless `reveal: true`. Branch → GET /v1/branches/{id}: `db_host`/`db_port`/`db_user`
+ *   and `db_pass` only on the explicit reveal opt-in. No credential recovery exists for the main
+ *   project's creation-time password — `connection()` reports that honestly (empty `secrets`).
+ * - `resetCredential({kind:'project'})`: PATCH /v1/projects/{ref}/database/password — the official
+ *   rotation endpoint REQUIRES `password`; when omitted the adapter generates a strong one and
+ *   returns it ONLY in `secrets`. No role resource exists on Supabase, so `resetCredential` is
+ *   declared for `project` only.
+ * - `action()`: `pause`, `restart`, and `resume` on `project` (official POST endpoints, no body:
+ *   pause/restart are `/v1/projects/{ref}/{pause,restart}`, and `resume` is the official
+ *   `POST /v1/projects/{ref}/restore` — "Restores the given project", the un-pause operation
+ *   behind the dashboard's Restore button; scope `projects:write` / `project_admin_write`; the
+ *   project status enum's `RESTORING` state and the `/restore/cancel` endpoint are the same
+ *   restoration lifecycle), and `reset` + `restore` on `branch` (official POST
+ *   /v1/branches/{id}/reset with optional `migration_version`, and POST /v1/branches/{id}/restore
+ *   — officially "Restore a scheduled branch deletion": it cancels a scheduled deletion and
+ *   restores the branch to active state; it is NOT a point-in-time data restore).
  */
 
 import { ManagementError } from './errors.js';
@@ -49,17 +73,24 @@ import type {
   CreateProjectSpec,
   CreateResourceSpec,
   FetchLike,
+  ManagementActionOptions,
   ManagementAdapter,
   ManagementAdapterCapabilities,
   ManagementCallOptions,
+  ManagementConnectionInfo,
+  ManagementConnectionInput,
   ManagementDeleteResult,
   ManagementListQuery,
+  ManagementOrganization,
   ManagementPage,
   ManagementProviderId,
+  ManagementRegion,
   ManagementResource,
   ManagementResourceKind,
+  ManagementSecret,
   ManagementStatus,
   ManagementWriteResult,
+  ResetCredentialOptions,
   ResourceRef,
   UpdateResourceSpec,
 } from './types.js';
@@ -173,6 +204,14 @@ function arrayOf(value: unknown): readonly Record<string, unknown>[] {
 
 function encodeSegment(value: string): string {
   return encodeURIComponent(value);
+}
+
+/**
+ * Replace the password segment of a `postgresql://user:password@host/db` URI with a redaction
+ * marker. Only the password is touched; everything else passes through unchanged.
+ */
+function redactConnectionUri(uri: string): string {
+  return uri.replace(/^(postgres(?:ql)?:\/\/[^:/@]+:)([^@]*)@/, '$1[redacted]@');
 }
 
 /** Merge optional fields into a request object, skipping `undefined` values. */
@@ -434,7 +473,23 @@ export function supabaseManagement(
 
   const capabilities: ManagementAdapterCapabilities = {
     resourceKinds: ['project', 'branch'],
-    supported: { update: ['project', 'branch'], delete: ['project', 'branch'] },
+    supported: {
+      update: ['project', 'branch'],
+      delete: ['project', 'branch'],
+      // A4: connection details are retrievable for both kinds; credential rotation is a
+      // project-level operation (Supabase has no role resource); lifecycle actions per the
+      // official API: pause/restart on projects, reset on branches, restore on branches (cancel
+      // scheduled deletion), and resume on projects (official POST /v1/projects/{ref}/restore).
+      connection: ['project', 'branch'],
+      resetCredential: ['project'],
+      actions: {
+        pause: ['project'],
+        restart: ['project'],
+        resume: ['project'],
+        reset: ['branch'],
+        restore: ['branch'],
+      },
+    },
     // The official list endpoints return the full array; there is no cursor/limit anywhere.
     pagination: false,
     // No operations endpoint. wait() polls resource status via GET (core resource-polling mode).
@@ -458,6 +513,16 @@ export function supabaseManagement(
       organizations: 'docs',
       databaseHost: 'docs',
       branchConfig: 'docs',
+      // A4 capabilities, all verified against the official OpenAPI spec (2026-10-06).
+      regions: 'docs',
+      'connection:project': 'docs',
+      'connection:branch': 'docs',
+      'resetCredential:project': 'docs',
+      'action:pause:project': 'docs',
+      'action:restart:project': 'docs',
+      'action:resume:project': 'docs',
+      'action:reset:branch': 'docs',
+      'action:restore:branch': 'docs',
     },
     prerequisites: {
       // Verified 2026-10-06 against the official spec: db_pass is required (generated when
@@ -467,6 +532,9 @@ export function supabaseManagement(
       'create:project': ['name', 'organizationId or providerOptions.organization_slug'],
       'create:branch': ['projectId', 'name (the API requires branch_name)'],
       'list:branch': ['projectId'],
+      // The official available-regions endpoint requires organization_slug.
+      'regions': ['organizationId (mapped to organization_slug)'],
+      'action:reset:branch': ['projectId'],
     },
   };
 
@@ -762,14 +830,306 @@ export function supabaseManagement(
     return { operation: null, indeterminate: false };
   }
 
+  // ---- A4: discovery, connection, actions, credentials ----------------------
+
+  async function listRegions(
+    input: { organizationId?: string },
+    callOptions?: ManagementCallOptions,
+  ): Promise<readonly ManagementRegion[]> {
+    // The official GET /v1/projects/available-regions endpoint requires organization_slug.
+    const organizationSlug = input?.organizationId;
+    if (typeof organizationSlug !== 'string' || organizationSlug === '') {
+      throw error(
+        'regions() on Supabase requires organizationId (the official available-regions endpoint ' +
+          'requires organization_slug). Pass an organization slug from organizations().',
+        'CONFIGURATION',
+      );
+    }
+    const response = await http.request('/projects/available-regions', {
+      query: { organization_slug: organizationSlug },
+      ...httpOptions(callOptions),
+    });
+    const payload = bodyRecord(response.body, 'available-regions');
+    const recommendations = isRecord(payload['recommendations']) ? payload['recommendations'] : {};
+    const regions: ManagementRegion[] = [];
+    const smartGroup = recommendations['smartGroup'];
+    if (isRecord(smartGroup)) {
+      const code = asString(smartGroup['code']);
+      if (code !== null) {
+        regions.push({
+          providerId: PROVIDER_ID,
+          id: code,
+          name: asString(smartGroup['name']),
+          platform: null,
+          default: null,
+          raw: redactRecord(smartGroup, REDACT_KEYS),
+        });
+      }
+    }
+    for (const specific of arrayOf(recommendations['specific'])) {
+      const code = asString(specific['code']);
+      if (code === null) continue;
+      regions.push({
+        providerId: PROVIDER_ID,
+        id: code,
+        name: asString(specific['name']),
+        platform: asString(specific['provider']),
+        default: null,
+        raw: redactRecord(specific, REDACT_KEYS),
+      });
+    }
+    return regions;
+  }
+
+  async function connectionInfo(
+    ref: ResourceRef,
+    input: ManagementConnectionInput,
+    callOptions?: ManagementCallOptions,
+  ): Promise<ManagementConnectionInfo> {
+    if (ref.kind !== 'project' && ref.kind !== 'branch') {
+      throw error(
+        `connection is not supported for kind '${String(ref.kind)}' by the 'supabase' adapter: ` +
+          'Supabase manages projects and branches only.',
+        'CAPABILITY',
+        { resourceKind: ref.kind, resourceId: ref.id },
+      );
+    }
+    if (ref.kind === 'branch') {
+      // Branch credentials come from the official GET /v1/branches/{branch_id_or_ref} endpoint
+      // (db_host, db_port, db_user; db_pass only on the explicit reveal opt-in).
+      const response = await http.request(`/branches/${encodeSegment(ref.id)}`, { ...httpOptions(callOptions) });
+      const payload = bodyRecord(response.body, 'get-branch-config');
+      const dbHost = asString(payload['db_host']);
+      if (dbHost === null) {
+        throw error(
+          "Supabase's branch config payload is missing 'db_host'.",
+          'PROVIDER',
+          { resourceKind: 'branch', resourceId: ref.id },
+        );
+      }
+      let secrets: ManagementSecret[] = [];
+      if (input.reveal === true) {
+        const dbPass = asString(payload['db_pass']);
+        if (dbPass !== null) {
+          secrets = [{ label: 'password', value: dbPass }];
+          registerSecret(dbPass);
+        }
+      }
+      return {
+        providerId: PROVIDER_ID,
+        kind: 'branch',
+        id: ref.id,
+        projectId: ref.projectId ?? null,
+        branchId: ref.id,
+        host: dbHost,
+        port: typeof payload['db_port'] === 'number' ? payload['db_port'] : null,
+        database: null, // the official payload carries no database name; never invented
+        role: asString(payload['db_user']),
+        pooled: null,
+        redactedUri: null, // the branch endpoint issues no URI; the caller assembles one from these fields
+        secrets,
+        raw: redactRecord(payload, REDACT_KEYS),
+      };
+    }
+
+    // Project: the official GET /v1/projects/{ref} carries database.host (no database/role names).
+    const response = await http.request(`/projects/${encodeSegment(ref.id)}`, { ...httpOptions(callOptions) });
+    const payload = bodyRecord(response.body, 'get-project');
+    const database = isRecord(payload['database']) ? payload['database'] : {};
+    const host = asString(database['host']);
+    if (host === null) {
+      throw error(
+        "Supabase's project payload carries no database.host yet (the project may still be provisioning).",
+        'PROVIDER',
+        { resourceKind: 'project', resourceId: ref.id },
+      );
+    }
+    if (input.pooled === true) {
+      // The official GET /v1/projects/{ref}/config/database/pooler returns the Supavisor
+      // configurations; the PRIMARY entry carries the pooled connection string (which embeds a
+      // password) plus db_host/db_port/db_user/db_name.
+      const poolerResponse = await http.request(`/projects/${encodeSegment(ref.id)}/config/database/pooler`, {
+        ...httpOptions(callOptions),
+      });
+      const entries = arrayOf(poolerResponse.body);
+      const primary = entries.find((entry) => entry['database_type'] === 'PRIMARY') ?? entries[0];
+      if (primary === undefined) {
+        throw error(
+          "Supabase's pooler config returned no entries.",
+          'PROVIDER',
+          { resourceKind: 'project', resourceId: ref.id },
+        );
+      }
+      const pooledHost = asString(primary['db_host']) ?? host;
+      const connectionString = asString(primary['connection_string']);
+      let secrets: ManagementSecret[] = [];
+      if (input.reveal === true && connectionString !== null) {
+        secrets = [{ label: 'connectionString', value: connectionString }];
+        registerSecret(connectionString);
+      }
+      return {
+        providerId: PROVIDER_ID,
+        kind: 'project',
+        id: ref.id,
+        projectId: ref.id,
+        branchId: null,
+        host: pooledHost,
+        port: typeof primary['db_port'] === 'number' ? primary['db_port'] : null,
+        database: asString(primary['db_name']),
+        role: asString(primary['db_user']),
+        pooled: true,
+        // The provider-issued pooled URI, password segment REDACTED unless revealed above.
+        redactedUri: connectionString === null ? null : redactConnectionUri(connectionString),
+        secrets,
+        raw: redactRecord(primary, REDACT_KEYS),
+      };
+    }
+    // Direct connection: the official API exposes the host only. It does NOT expose the
+    // creation-time password (that is a one-time secret from project creation), so `secrets`
+    // stays empty here — honest "no credential recovery", nothing fabricated.
+    return {
+      providerId: PROVIDER_ID,
+      kind: 'project',
+      id: ref.id,
+      projectId: ref.id,
+      branchId: null,
+      host,
+      port: null,
+      database: null, // not carried by the official project payload; never invented
+      role: null,
+      pooled: false,
+      redactedUri: null,
+      secrets: [],
+      raw: redactRecord(payload, REDACT_KEYS),
+    };
+  }
+
+  async function performAction(
+    ref: ResourceRef,
+    action: string,
+    options: ManagementActionOptions,
+  ): Promise<ManagementWriteResult> {
+    if (ref.kind === 'project' && (action === 'pause' || action === 'restart')) {
+      // Official POST /v1/projects/{ref}/pause and /restart: no body, 200 with empty body.
+      // Neither returns an operation (Supabase has no operations API); track progress by
+      // polling get() (status PAUSING/RESTARTING, normalized via the standard mapping).
+      await http.request(`/projects/${encodeSegment(ref.id)}/${action}`, {
+        method: 'POST',
+        ...httpOptions(options),
+      });
+      return { resource: null, operation: null, secrets: [], indeterminate: false };
+    }
+    if (ref.kind === 'project' && action === 'resume') {
+      // Official POST /v1/projects/{ref}/restore ("Restores the given project"): the un-pause
+      // operation for a paused project (the lifecycle whose RESTORING status the project enum
+      // reports and whose POST /restore/cancel counterpart cancels the restoration). No body,
+      // empty 200; progress is tracked by polling get() — RESTORING → creating → ACTIVE_HEALTHY.
+      await http.request(`/projects/${encodeSegment(ref.id)}/restore`, {
+        method: 'POST',
+        ...httpOptions(options),
+      });
+      return { resource: null, operation: null, secrets: [], indeterminate: false };
+    }
+    if (ref.kind === 'branch' && action === 'restore') {
+      // Official POST /v1/branches/{branch_id_or_ref}/restore ("Restore a scheduled branch
+      // deletion"): cancels a scheduled deletion and restores the branch to active state.
+      // No body, 201 { message: 'Branch restoration initiated' }. Track progress by polling
+      // get() on the branch.
+      await http.request(`/branches/${encodeSegment(ref.id)}/restore`, {
+        method: 'POST',
+        ...httpOptions(options),
+      });
+      return { resource: null, operation: null, secrets: [], indeterminate: false };
+    }
+    if (ref.kind === 'branch' && action === 'reset') {
+      // Official POST /v1/branches/{branch_id_or_ref}/reset. Body: { migration_version? }.
+      const input = options.input ?? {};
+      const migrationVersion = input['migrationVersion'] ?? input['migration_version'];
+      if (migrationVersion !== undefined && typeof migrationVersion !== 'string') {
+        throw error('action reset input.migrationVersion must be a string when provided.', 'CONFIGURATION', {
+          resourceKind: 'branch',
+          resourceId: ref.id,
+        });
+      }
+      const response = await http.request(`/branches/${encodeSegment(ref.id)}/reset`, {
+        method: 'POST',
+        ...(migrationVersion !== undefined ? { body: { migration_version: migrationVersion } } : {}),
+        ...httpOptions(options),
+      });
+      // Response: { workflow_run_id, message: 'ok' } — the reset is initiated; track progress
+      // by polling get() on the branch (status polling). The workflow id is not part of the
+      // normalized result shape and is not fabricated into one.
+      bodyRecord(response.body, 'branch-reset');
+      return { resource: null, operation: null, secrets: [], indeterminate: false };
+    }
+    throw error(
+      `action '${action}' is not supported for kind '${String(ref.kind)}' by the 'supabase' adapter. ` +
+        "Supported: 'pause', 'restart', and 'resume' on 'project' (resume is the official " +
+        'POST /v1/projects/{ref}/restore, the un-pause operation for a paused project), and ' +
+        "'reset' and 'restore' on 'branch' (restore cancels a scheduled branch deletion).",
+      'CAPABILITY',
+      { resourceKind: ref.kind, resourceId: ref.id },
+    );
+  }
+
+  async function resetProjectCredential(
+    ref: ResourceRef,
+    options: ResetCredentialOptions,
+  ): Promise<ManagementWriteResult> {
+    if (ref.kind !== 'project') {
+      throw error(
+        `resetCredential is not supported for kind '${String(ref.kind)}' by the 'supabase' adapter: ` +
+          "Supabase rotates the project's postgres password via PATCH /v1/projects/{ref}/database/" +
+          "password (kind 'project'). Supabase has no role resource.",
+        'CAPABILITY',
+        { resourceKind: ref.kind, resourceId: ref.id },
+      );
+    }
+    // The official endpoint REQUIRES password (min length 4). Generate a strong one when the
+    // caller omits it and return it ONLY via secrets (the API never echoes it).
+    const generated = options.password === undefined;
+    const password = options.password ?? generateDatabasePassword();
+    registerSecret(password);
+    await http.request(`/projects/${encodeSegment(ref.id)}/database/password`, {
+      method: 'PATCH',
+      body: { password },
+      ...httpOptions(options),
+    });
+    return {
+      resource: null,
+      operation: null,
+      secrets: generated ? [{ label: 'password', value: password }] : [],
+      indeterminate: false,
+    };
+  }
+
   // ---- raw escape hatch -------------------------------------------------------
 
-  async function listOrganizations(callOptions?: ManagementCallOptions): Promise<SupabaseOrganization[]> {
+  async function fetchOrganizations(callOptions?: ManagementCallOptions): Promise<readonly ManagementOrganization[]> {
     const response = await http.request('/organizations', { ...httpOptions(callOptions) });
-    return arrayOf(response.body).map((payload) => ({
-      id: asString(payload['id']),
-      slug: asString(payload['slug']) ?? '',
-      name: asString(payload['name']) ?? '',
+    return arrayOf(response.body).map((payload) => {
+      const slug = asString(payload['slug']);
+      if (slug === null || slug === '') {
+        throw error("Supabase's organization payload is missing a 'slug'.", 'PROVIDER');
+      }
+      return {
+        providerId: PROVIDER_ID,
+        // The slug is the canonical org identifier (the current create-project API requires it).
+        id: slug,
+        name: asString(payload['name']),
+        // The deprecated numeric/string id, when present.
+        aliasId: asString(payload['id']),
+        raw: redactRecord(payload, REDACT_KEYS),
+      };
+    });
+  }
+
+  async function listOrganizations(callOptions?: ManagementCallOptions): Promise<SupabaseOrganization[]> {
+    const organizations = await fetchOrganizations(callOptions);
+    return organizations.map((organization) => ({
+      id: organization.aliasId,
+      slug: organization.id,
+      name: organization.name ?? '',
     }));
   }
 
@@ -852,6 +1212,11 @@ export function supabaseManagement(
     get,
     update,
     delete: remove,
+    organizations: fetchOrganizations,
+    regions: listRegions,
+    connection: connectionInfo,
+    action: performAction,
+    resetCredential: resetProjectCredential,
     raw,
   };
 

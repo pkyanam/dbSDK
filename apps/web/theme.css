@@ -170,3 +170,21 @@ html {
 :root[data-theme="dark"] header[data-blume-header] img[src="/brand/dbmark-512.webp"] {
   filter: invert(1);
 }
+
+/* Header brand sizing (steering: "make logo and dbSDK text top left a
+   little larger"). Blume's header Logo renders the mark in an h-5 box
+   (20px) and the wordmark at text-base (16px, semibold). Measured from
+   the rendered header: the mark is bumped 20% to 24px and the wordmark
+   ~19% to 19px, both still comfortably inside the 64px (h-16) bar, so
+   the change is CSS-only - no config, no layout/metadata hunk. The
+   selectors reuse the same scoping as the dark-mode invert rule above
+   (the header logo image only; nothing else on the site is resized),
+   and :has() keys the wordmark to the anchor that wraps that image. */
+header[data-blume-header] img[src="/brand/dbmark-512.webp"] {
+  height: 24px;
+  width: auto;
+}
+header[data-blume-header] a:has(> img[src="/brand/dbmark-512.webp"]) {
+  font-size: 19px;
+  letter-spacing: -0.2px;
+}

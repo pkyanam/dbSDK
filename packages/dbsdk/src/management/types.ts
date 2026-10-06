@@ -127,6 +127,122 @@ export type ManagementSecret = {
   value: string;
 };
 
+// ---------------------------------------------------------------------------
+// Amendment A4 — discovery, connections, credentials, actions (2026-10-06)
+// ---------------------------------------------------------------------------
+
+/** One organization from the provider's account, as returned by `client.organizations()`. */
+export type ManagementOrganization = {
+  providerId: ManagementProviderId;
+  /**
+   * The provider's canonical organization identifier — the value to pass as
+   * `organizationId` on project creation (Neon: org id; Supabase: slug, which the current
+   * create-project API requires). Never empty.
+   */
+  id: string;
+  name: string | null;
+  /**
+   * A secondary provider identifier when one exists (e.g. Supabase's deprecated numeric
+   * `id`, Neon's URL-safe `handle`). `null` when the provider has only one identifier.
+   */
+  aliasId: string | null;
+  /** Provider payload (no secrets exist on these endpoints). */
+  raw: Record<string, unknown>;
+};
+
+/** One region available for new resources, as returned by `client.regions()`. */
+export type ManagementRegion = {
+  providerId: ManagementProviderId;
+  /** The provider's own region identifier, e.g. Neon `aws-us-east-1`, Supabase `us-east-1`. */
+  id: string;
+  /** Human-readable name when the provider provides one. */
+  name: string | null;
+  /** Cloud platform when the provider reports one (e.g. Supabase `AWS`, Neon platform ids). */
+  platform: string | null;
+  /** Whether the provider selects this region by default. `null` when not reported. */
+  default: boolean | null;
+  /** Provider payload. */
+  raw: Record<string, unknown>;
+};
+
+/** Input for `client.connection()`. Provider requirements differ and are enforced per adapter. */
+export type ManagementConnectionInput = {
+  /** Neon: required by the official connection_uri endpoint. */
+  databaseName?: string;
+  /** Neon: required by the official connection_uri endpoint. */
+  roleName?: string;
+  /** `true` requests the pooled (PgBouncer / Supavisor) connection variant. */
+  pooled?: boolean;
+  /**
+   * Explicit secret opt-in. `false`/omitted: any provider-issued URI is returned redacted and
+   * `secrets` is empty. `true`: credential values the provider API actually returned at request
+   * time are additionally surfaced in `secrets` — treat them like passwords; never log them.
+   */
+  reveal?: boolean;
+};
+
+/**
+ * Provider-selected connection details for an existing resource, as returned by
+ * `client.connection()`. Every field is the provider's own value or `null` when the provider's
+ * API does not expose it — the SDK never fabricates hosts, roles, database names, or URIs, and
+ * never derives a database credential from the management API key/token.
+ */
+export type ManagementConnectionInfo = {
+  providerId: ManagementProviderId;
+  /** The kind of resource the details point at (`project` or `branch` today). */
+  kind: ManagementResourceKind;
+  id: string;
+  projectId: string | null;
+  branchId: string | null;
+  /** Real host from the provider API (never invented). `null` only when the provider's response does not expose one. */
+  host: string | null;
+  port: number | null;
+  /** Database name when the provider API selected one. */
+  database: string | null;
+  /** Role/user when the provider API selected one. */
+  role: string | null;
+  /** Whether this is the pooled connection variant, when the provider reports it. */
+  pooled: boolean | null;
+  /**
+   * Provider-issued connection URI with its password segment REDACTED. `null` when the
+   * provider offers no URI endpoint for this resource.
+   */
+  redactedUri: string | null;
+  /**
+   * Credential values only when the provider API actually returned them at request time AND
+   * the caller passed `reveal: true` on the connection call (e.g. Neon's connection URI
+   * password, Supabase branch `db_pass`). Empty otherwise.
+   */
+  secrets: readonly ManagementSecret[];
+  /** Provider payload with secret-bearing keys redacted. */
+  raw: Record<string, unknown>;
+};
+
+/**
+ * Options for `client.action()`: an optional provider-defined input body plus the usual
+ * transport controls. Input values are validated by the adapter against its official API.
+ */
+export type ManagementActionOptions = {
+  /** Provider-defined request body for actions that take one (e.g. Neon branch restore). */
+  input?: Record<string, unknown>;
+  signal?: AbortSignal;
+  /** Per-request timeout in milliseconds. */
+  timeoutMs?: number;
+};
+
+/**
+ * Options for `client.resetCredential()`. When `password` is omitted on providers that require
+ * one, the adapter generates a cryptographically random password and returns it ONLY in the
+ * result's `secrets` (the provider never echoes it back). A caller-supplied password is sent
+ * but never echoed.
+ */
+export type ResetCredentialOptions = {
+  password?: string;
+  signal?: AbortSignal;
+  /** Per-request timeout in milliseconds. */
+  timeoutMs?: number;
+};
+
 /** Options for creating a project. Required provider-side fields are enforced by the adapter. */
 export type CreateProjectSpec = {
   kind: 'project';
@@ -306,6 +422,24 @@ export type ManagementAdapterCapabilities = {
   supported: {
     update: readonly ManagementResourceKind[];
     delete: readonly ManagementResourceKind[];
+    /**
+     * Kinds for which `client.connection()` can retrieve provider-selected connection details
+     * (A4). Optional; a kind absent from the list is refused with `CAPABILITY` before dispatch.
+     */
+    connection?: readonly ManagementResourceKind[];
+    /**
+     * Kinds for which `client.resetCredential()` can rotate a password/credential (A4).
+     * Optional; a kind absent from the list is refused with `CAPABILITY` before dispatch.
+     */
+    resetCredential?: readonly ManagementResourceKind[];
+    /**
+     * Lifecycle actions (A4) as action name -> kinds that support it, e.g.
+     * `{ pause: ['project'], restart: ['project'], start: ['endpoint'] }`. Optional; an action
+     * not declared for the ref's kind is refused with `CAPABILITY` before dispatch. Action
+     * names are lowercase verbs (`pause`, `resume`, `restart`, `start`, `suspend`, `stop`,
+     * `reset`, `restore`, `recover`, ...); the mapping is the honest per-provider table.
+     */
+    actions?: Readonly<Record<string, readonly ManagementResourceKind[]>>;
   };
   /** True when `list()` honors `cursor`/`limit` server-side (Neon: true, Supabase: false). */
   pagination: boolean;
@@ -357,6 +491,46 @@ export type ManagementAdapter<Raw = unknown> = {
     operation: ManagementOperation,
     options?: ManagementCallOptions,
   ): Promise<ManagementOperation>;
+  /**
+   * Optional (A4): list the caller's organizations for discovery (e.g. the prerequisite scope
+   * of project creation). The core client refuses with `CAPABILITY` when not implemented.
+   */
+  organizations?(callOptions?: ManagementCallOptions): Promise<readonly ManagementOrganization[]>;
+  /**
+   * Optional (A4): list regions available for new resources. `input.organizationId` is required
+   * by adapters whose region endpoint is organization-scoped (Supabase) and ignored otherwise.
+   */
+  regions?(
+    input: { organizationId?: string },
+    callOptions?: ManagementCallOptions,
+  ): Promise<readonly ManagementRegion[]>;
+  /**
+   * Optional (A4): retrieve provider-selected connection details for an existing resource.
+   * Declared per kind in `capabilities.supported.connection`.
+   */
+  connection?(
+    ref: ResourceRef,
+    input: ManagementConnectionInput,
+    callOptions?: ManagementCallOptions,
+  ): Promise<ManagementConnectionInfo>;
+  /**
+   * Optional (A4): perform a declared lifecycle action (pause/restart/start/restore/...).
+   * Declared per action and kind in `capabilities.supported.actions`.
+   */
+  action?(
+    ref: ResourceRef,
+    action: string,
+    options?: ManagementActionOptions,
+  ): Promise<ManagementWriteResult>;
+  /**
+   * Optional (A4): rotate the password credential of a declared resource kind (Neon role
+   * reset_password; Supabase project database password). Declared per kind in
+   * `capabilities.supported.resetCredential`.
+   */
+  resetCredential?(
+    ref: ResourceRef,
+    options?: ResetCredentialOptions,
+  ): Promise<ManagementWriteResult>;
   /** Typed escape hatch (e.g. prebuilt API clients). Never contains secrets. */
   readonly raw: Raw;
 };
@@ -381,6 +555,52 @@ export type ManagementClient<Raw = unknown> = {
    * otherwise polls `get(ref)` for `active`/`failed`.
    */
   wait(target: WaitTarget, options?: WaitOptions): Promise<ManagementResource>;
+  /**
+   * (A4) List the caller's organizations for discovery — e.g. the prerequisite scope of
+   * project creation. Refused with `CAPABILITY` when the adapter does not implement it.
+   */
+  organizations(callOptions?: ManagementCallOptions): Promise<readonly ManagementOrganization[]>;
+  /**
+   * (A4) List regions available for new resources. `input.organizationId` is required by
+   * adapters whose official region endpoint is organization-scoped (Supabase) and ignored by
+   * the others. Refused with `CAPABILITY` when the adapter does not implement it.
+   */
+  regions(
+    input?: { organizationId?: string },
+    callOptions?: ManagementCallOptions,
+  ): Promise<readonly ManagementRegion[]>;
+  /**
+   * (A4) Provider-selected connection details for an existing resource: real host/port/
+   * database/role and, when the provider offers a URI endpoint, a password-REDACTED uri.
+   * Credential values surface only in `secrets` and only after the explicit `reveal: true`
+   * opt-in. The management credential is never used as a database credential and no field is
+   * ever fabricated. Declared per kind in `capabilities.supported.connection`.
+   */
+  connection(
+    ref: ResourceRef,
+    input?: ManagementConnectionInput,
+    callOptions?: ManagementCallOptions,
+  ): Promise<ManagementConnectionInfo>;
+  /**
+   * (A4) Perform a declared lifecycle action (pause, restart, start, suspend, reset,
+   * restore, ...) on a resource. GET-only rules do not apply — this is an explicit mutation —
+   * and it is never retried. Declared per action and kind in `capabilities.supported.actions`;
+   * unknown actions or kinds are refused with `CAPABILITY` before dispatch.
+   */
+  action(
+    ref: ResourceRef,
+    action: string,
+    options?: ManagementActionOptions,
+  ): Promise<ManagementWriteResult>;
+  /**
+   * (A4) Rotate the password credential of a declared resource kind. When `password` is
+   * omitted on providers that require one, the adapter generates a strong password and returns
+   * it ONLY in `secrets`. Declared per kind in `capabilities.supported.resetCredential`.
+   */
+  resetCredential(
+    ref: ResourceRef,
+    options?: ResetCredentialOptions,
+  ): Promise<ManagementWriteResult>;
   readonly raw: Raw;
 };
 

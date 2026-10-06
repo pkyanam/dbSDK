@@ -88,25 +88,36 @@ const brands = [
    per-provider blocks), one row per provider, Create / Manage / Query
    columns. Cell vocabulary is exactly "Supported" / "Planned" /
    "Not applicable"; each cell shows a monochrome mark with the
-   full word available to screen readers. Supabase and Neon create/manage
-   are Supported: both management adapters are implemented against their
-   official APIs with offline/local test evidence (hosted requests are not
-   part of the evidence; the providers answer for credentials and plan
-   tiers). The PostgreSQL connector wraps a database you already have:
-   there is no provider API for it to call, so create/manage are "Not
-   applicable". Update these rows as adapters land; the management docs
-   and the capability descriptor are the canonical sources. */
+   full word available to screen readers. Status basis (check the
+   coordination reports before editing a cell):
+   - Supabase + Neon create/manage: implemented against the official
+     control-plane APIs, ACCEPT-reviewed (coordination/v3-provider-review-r2.md,
+     offline/local evidence; hosted requests are not part of the evidence).
+   - PlanetScale Postgres: ACCEPT-reviewed for the PostgreSQL engine scope
+     (coordination/planetscale-postgres-acceptance-r4.md); the public exports
+     are wired (`dbsdk/planetscale`, `dbsdk/management/planetscale`). The
+     reviewed scope is the Postgres engine only, so it gets its own supported
+     row and Vitess/MySQL stays a separate planned row - never a combined
+     "PlanetScale supported" claim.
+   - The PostgreSQL connector wraps a database you already have: there is no
+     provider API for it to call, so create/manage are "Not applicable".
+   Update these rows as adapters land; the management docs and the capability
+   descriptor are the canonical sources. */
 const SUPPORTED = { mark: "\u2713", label: "Supported" };
 const PLANNED = { mark: "\u25CB", label: "Planned" };
 const NOT_APPLICABLE = { mark: "\u2014", label: "Not applicable" };
 
 /* Map each table row to the brand mark shown beside its name. Brands,
    not products: AWS RDS and Aurora share the AWS mark, Google Cloud SQL
-   and AlloyDB share the Google Cloud mark. */
+   and AlloyDB share the Google Cloud mark, and both PlanetScale engine
+   rows share the PlanetScale mark. */
 const providerMark = (provider: string) => {
   if (provider.startsWith("AWS")) return brands.find((b) => b.name === "AWS");
   if (provider.startsWith("Google")) {
     return brands.find((b) => b.name === "Google Cloud");
+  }
+  if (provider.startsWith("PlanetScale")) {
+    return brands.find((b) => b.name === "PlanetScale");
   }
   return brands.find((b) => b.name === provider);
 };
@@ -118,10 +129,169 @@ const compatibility = [
   { provider: "Google AlloyDB", create: PLANNED, manage: PLANNED, query: PLANNED },
   { provider: "Supabase", create: SUPPORTED, manage: SUPPORTED, query: SUPPORTED },
   { provider: "Neon", create: SUPPORTED, manage: SUPPORTED, query: SUPPORTED },
+  { provider: "PlanetScale Postgres", create: SUPPORTED, manage: SUPPORTED, query: SUPPORTED },
+  { provider: "PlanetScale Vitess", create: PLANNED, manage: PLANNED, query: PLANNED },
   { provider: "Heroku", create: PLANNED, manage: PLANNED, query: PLANNED },
-  { provider: "PlanetScale", create: PLANNED, manage: PLANNED, query: PLANNED },
   { provider: "Convex", create: PLANNED, manage: PLANNED, query: PLANNED },
   { provider: "PostgreSQL", create: NOT_APPLICABLE, manage: NOT_APPLICABLE, query: SUPPORTED },
+];
+
+/* ------------------------------------------------------------------ */
+/* Code specimen: one flow per provider, real public factories only.   */
+/* Each snippet provisions with the management layer, waits, connects  */
+/* to the resource it just created (creation-time credentials, real    */
+/* host from the provider API), and runs a bound query that works on   */
+/* a fresh database with no tables. The verb skeleton is identical     */
+/* across providers; only the imports and options change. The          */
+/* PostgreSQL tab is the connect-an-existing-database path, labeled    */
+/* as such. Snippets are plain template strings rendered as text       */
+/* content, so Astro escapes them; no syntax highlighting, monochrome  */
+/* panel. Kept compilable against the packed package - typechecked in  */
+/* a scratch consumer fixture and executed against a local PostgreSQL  */
+/* with a fake provider transport whenever it changes.                 */
+/* ------------------------------------------------------------------ */
+const specimen = {
+  supabase: `import { createDatabase } from "dbsdk";
+import { supabase } from "dbsdk/supabase";
+import { createManagement } from "dbsdk/management";
+import { supabaseManagement } from "dbsdk/management/supabase";
+
+const management = createManagement({
+  adapter: supabaseManagement({
+    accessToken: process.env.SUPABASE_ACCESS_TOKEN!, // sbp_... personal access token
+  }),
+});
+
+// 1. Provision: create the project, then wait until it is active.
+const result = await management.create({
+  kind: "project",
+  name: "my-app",
+  organizationId: "my-org-slug", // from management.organizations()
+});
+const project = await management.wait(result, { timeoutMs: 120_000 });
+
+// 2. Connect to the project you just created: the creation-time password
+//    (shown once, in result.secrets) and the real host from the API.
+const password = result.secrets.find((s) => s.label === "password")!.value;
+const host = await management.raw.databaseHost(project.id);
+const db = createDatabase({
+  adapter: supabase({
+    connectionString: \`postgresql://postgres:\${encodeURIComponent(password)}@\${host}:5432/postgres\`,
+    connectionMode: "direct",
+  }),
+});
+
+// 3. Query: one bound parameter, works on a fresh database.
+try {
+  const value = "hello from dbSDK";
+  const { rows } = await db.sql\`select \${value}::text as value\`;
+  // rows[0].value === "hello from dbSDK"
+} finally {
+  await db.close();
+}`,
+  neon: `import { createDatabase } from "dbsdk";
+import { neon } from "dbsdk/neon";
+import { createManagement } from "dbsdk/management";
+import { neonManagement } from "dbsdk/management/neon";
+
+const management = createManagement({
+  adapter: neonManagement({ apiKey: process.env.NEON_API_KEY! }),
+});
+
+// 1. Provision: create the project, then wait until every operation
+//    finishes. wait() issues GET requests only; it never resubmits.
+const result = await management.create({ kind: "project", name: "my-app" });
+const project = await management.wait(result, { timeoutMs: 120_000 });
+
+// 2. Connect to that project: an official connection URI, redacted by
+//    default and revealed only with the explicit reveal: true opt-in.
+const uri = await management.raw.connectionUri({
+  projectId: project.id,
+  databaseName: "neondb",
+  roleName: "neondb_owner",
+  reveal: true,
+});
+const db = createDatabase({
+  adapter: neon({ connectionString: uri, transport: "http" }),
+});
+
+// 3. Query: one bound parameter, works on a fresh database.
+try {
+  const value = "hello from dbSDK";
+  const { rows } = await db.sql\`select \${value}::text as value\`;
+  // rows[0].value === "hello from dbSDK"
+} finally {
+  await db.close();
+}`,
+  planetscale: `import { createDatabase } from "dbsdk";
+import { planetscale } from "dbsdk/planetscale";
+import { createManagement } from "dbsdk/management";
+import { planetscaleManagement } from "dbsdk/management/planetscale";
+
+const management = createManagement({
+  adapter: planetscaleManagement({
+    tokenId: process.env.PLANETSCALE_TOKEN_ID!,
+    tokenSecret: process.env.PLANETSCALE_TOKEN_SECRET!,
+    organization: "my-org-slug", // required owner for all CRUD
+  }),
+});
+
+// 1. Provision: cluster_size is required by the official API. Every
+//    mutation is engine-gated: a non-PostgreSQL parent is refused
+//    before anything is sent.
+const result = await management.create({
+  kind: "project",
+  name: "my-database",
+  providerOptions: { cluster_size: "PS-10-GP" },
+});
+const database = await management.wait(result);
+
+// 2. Credentials: role passwords are one-time secrets. Create a role on
+//    the database's default branch ("main"), then read the real host,
+//    port, username, and database name back through connection().
+const scope = { projectId: database.id, branchId: "main" };
+const roleResult = await management.create({ kind: "role", name: "app", scope });
+const role = await management.wait(roleResult);
+const details = await management.connection({ kind: "role", id: role.id, scope });
+const password = roleResult.secrets[0]!.value; // shown once, never again
+const db = createDatabase({
+  adapter: planetscale({
+    connectionString: \`postgresql://\${encodeURIComponent(details.role!)}:\${encodeURIComponent(password)}@\${details.host}:\${details.port}/\${encodeURIComponent(details.database!)}\`,
+    connectionMode: "direct",
+  }),
+});
+
+// 3. Query: one bound parameter, works on a fresh database.
+try {
+  const value = "hello from dbSDK";
+  const { rows } = await db.sql\`select \${value}::text as value\`;
+  // rows[0].value === "hello from dbSDK"
+} finally {
+  await db.close();
+}`,
+  postgres: `import { createDatabase } from "dbsdk";
+import { postgres } from "dbsdk/postgres";
+
+// Connect an existing PostgreSQL endpoint: no provisioning step, the
+// same query client the managed providers hand you.
+const db = createDatabase({
+  adapter: postgres({ connectionString: process.env.DATABASE_URL! }),
+});
+
+try {
+  const value = "hello from dbSDK";
+  const { rows } = await db.sql\`select \${value}::text as value\`;
+  // rows[0].value === "hello from dbSDK"
+} finally {
+  await db.close();
+}`,
+};
+
+const specimenTabs = [
+  { id: "supabase", label: "Supabase", code: specimen.supabase },
+  { id: "neon", label: "Neon", code: specimen.neon },
+  { id: "planetscale", label: "PlanetScale Postgres", code: specimen.planetscale },
+  { id: "postgres", label: "PostgreSQL", code: specimen.postgres },
 ];
 ---
 
@@ -257,30 +427,85 @@ const compatibility = [
       table</a> has the per-capability status.
     </p>
 
+    <!-- ============ CODE SPECIMEN ============ -->
+    <!-- One flow per provider, tabbed. Every snippet is the documented
+         path with the real public factories: provision (management verbs),
+         connect (the provider adapter), query (db.sql). The verb skeleton
+         is identical across providers; only imports and options change. -->
+    <section class="specimen" aria-labelledby="specimen-title">
+      <div class="specimen-head">
+        <h2 class="section-title" id="specimen-title">One flow. Same verbs.</h2>
+        <p class="section-copy">
+          Provision with the management layer, connect through the adapter,
+          and query with one client. The imports and options change per
+          provider; the verbs do not.
+        </p>
+      </div>
+      <div class="spec-tabs" role="tablist" aria-label="Provider code example" data-spec-tabs>
+        {specimenTabs.map((tab, i) => (
+          <button
+            class="spec-tab"
+            role="tab"
+            type="button"
+            id={`spec-tab-${tab.id}`}
+            aria-controls={`spec-panel-${tab.id}`}
+            aria-selected={i === 0 ? "true" : "false"}
+            tabindex={i === 0 ? 0 : -1}
+          >
+            {tab.label}
+          </button>
+        ))}
+      </div>
+      {specimenTabs.map((tab, i) => (
+        <div
+          class="spec-panel"
+          role="tabpanel"
+          id={`spec-panel-${tab.id}`}
+          aria-labelledby={`spec-tab-${tab.id}`}
+          hidden={i !== 0}
+        >
+          <pre class="spec-code"><code>{tab.code}</code></pre>
+        </div>
+      ))}
+      <p class="spec-note">
+        Real factories, real option names, in this order:
+        <code>dbsdk</code>, <code>dbsdk/management</code>, and one adapter
+        entry per provider. The full walkthrough is in
+        <a href="/docs/getting-started">getting started</a> and
+        <a href="/docs/management">management</a>. For typed schema queries
+        on the same dbSDK-owned connections, the optional Drizzle bridge is
+        covered in <a href="/docs/drizzle">drizzle</a>.
+      </p>
+    </section>
+
     <!-- ============ CREATE / MANAGE / QUERY ============ -->
     <section class="pillars" aria-label="What dbSDK does">
       <article>
         <span class="pillar-step">01</span>
-        <h2 class="pillar-title">Create</h2>
+        <h2 class="pillar-title">Provision</h2>
         <p class="pillar-copy">
-          Provision a database on your provider of choice without leaving
-          your SDK. Your credentials stay yours.
+          Create a project or database through your provider's own control
+          plane with one verb: <code>create</code>, then <code>wait</code>
+          until it is ready. Your credentials stay yours.
         </p>
       </article>
       <article>
         <span class="pillar-step">02</span>
         <h2 class="pillar-title">Manage</h2>
         <p class="pillar-copy">
-          Inspect, update, and retire your resources. One client for the
-          whole lifecycle.
+          One verb set over every provider's resources:
+          <code>list</code>, <code>get</code>, <code>update</code>,
+          <code>delete</code>, lifecycle actions, and credential rotation.
+          Refusals are explicit, never silent.
         </p>
       </article>
       <article>
         <span class="pillar-step">03</span>
         <h2 class="pillar-title">Query</h2>
         <p class="pillar-copy">
-          Run queries through one typed client. The SQL adapters share one
-          result shape and the same binding rules.
+          One typed SQL client: parameterized queries, transactions, and
+          atomic batches. The same result envelope on every adapter, on
+          every transport.
         </p>
       </article>
     </section>
@@ -347,6 +572,11 @@ const compatibility = [
         <span class="legend-item"><span class="legend-mark" aria-hidden="true">&#10003;</span> Supported</span>
         <span class="legend-item"><span class="legend-mark" aria-hidden="true">&#9711;</span> Planned</span>
         <span class="legend-item"><span class="legend-mark" aria-hidden="true">&#8212;</span> Not applicable</span>
+      </p>
+      <p class="compat-footnote">
+        PlanetScale Postgres and Vitess have separate adapters. See
+        <a href="/docs/capabilities">provider capabilities</a> for the
+        per-capability detail.
       </p>
     </section>
 
@@ -708,6 +938,83 @@ const compatibility = [
     }
   }
 
+  /* ---------- code specimen ----------
+     One flow per provider behind monochrome tabs. The panel is the same
+     near-black code surface the docs use (in both modes), with light gray
+     plain code; no syntax highlighting, no chromatic tokens. The pre
+     scrolls horizontally inside the panel only, so long lines never widen
+     the page. Tabs are real ARIA tabs: arrow keys move between them, and
+     there is no animation to reduce. */
+  .specimen {
+    margin-top: 52px;
+    padding-bottom: 48px;
+    border-bottom: 1px solid var(--line);
+  }
+  .specimen-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 10px 40px;
+  }
+  .spec-tabs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 26px;
+  }
+  .spec-tab {
+    font: inherit;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--ink);
+    background: transparent;
+    border: 1px solid var(--line);
+    border-radius: 0;
+    padding: 7px 14px;
+    cursor: pointer;
+  }
+  .spec-tab:hover {
+    border-color: var(--ink);
+  }
+  .spec-tab[aria-selected="true"] {
+    background: var(--ink);
+    border-color: var(--ink);
+    color: var(--paper);
+  }
+  .spec-tab:focus-visible {
+    outline: 2px solid currentColor;
+    outline-offset: 2px;
+  }
+  .spec-panel {
+    margin-top: 12px;
+  }
+  .spec-code {
+    margin: 0;
+    padding: 20px 22px;
+    background: var(--dbsdk-panel);
+    color: #d4d4d4;
+    font-family: var(--font-mono, ui-monospace, "SF Mono", Menlo, Consolas, monospace);
+    font-size: 13px;
+    line-height: 1.7;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  .spec-code code {
+    font-family: inherit;
+  }
+  .spec-note {
+    margin: 14px 0 0;
+    font-size: 12px;
+    line-height: 1.8;
+    color: var(--muted);
+  }
+  .spec-note code {
+    font-family: var(--font-mono, ui-monospace, "SF Mono", Menlo, Consolas, monospace);
+    font-size: 0.95em;
+    color: var(--ink);
+  }
+
   /* ---------- pillars ---------- */
   .pillars {
     display: grid;
@@ -861,6 +1168,13 @@ const compatibility = [
   }
   .legend-mark {
     color: var(--ink);
+  }
+  .compat-footnote {
+    margin: 10px 0 0;
+    max-width: 42rem;
+    font-size: 12px;
+    line-height: 1.7;
+    color: var(--muted);
   }
 
   /* ---------- content sections ---------- */
@@ -1022,6 +1336,19 @@ const compatibility = [
     .strip {
       margin-top: 32px;
     }
+    .specimen {
+      margin-top: 36px;
+      padding-bottom: 36px;
+    }
+    .spec-tab {
+      font-size: 12px;
+      padding: 6px 11px;
+    }
+    .spec-code {
+      padding: 14px 16px;
+      font-size: 12px;
+      line-height: 1.65;
+    }
     .strip-list {
       gap: 28px;
       padding-right: 28px;
@@ -1088,3 +1415,47 @@ const compatibility = [
     }
   }
 </style>
+
+<script is:inline>
+  /* Code specimen tabs. Deliberately plain: no animation, no library, and
+     inline (no bundler) so the tabs never depend on the dev-server module
+     graph. Click selects; ArrowLeft/ArrowRight move between tabs per the
+     ARIA tabs pattern, wrapping at the ends. Panels toggle via [hidden].
+     Re-bound after view-transition swaps (astro:after-swap); the data flag
+     keeps a swap that does not replace the tablist from double-binding. */
+  (function () {
+    function wireSpecTabs() {
+      var tablist = document.querySelector("[data-spec-tabs]");
+      if (!tablist || tablist.dataset.specWired) return;
+      tablist.dataset.specWired = "1";
+      var tabs = Array.prototype.slice.call(tablist.querySelectorAll('[role="tab"]'));
+      var panels = tabs.map(function (tab) {
+        return document.getElementById(tab.getAttribute("aria-controls") || "");
+      });
+      var select = function (tab, focus) {
+        tabs.forEach(function (t, i) {
+          var active = t === tab;
+          t.setAttribute("aria-selected", active ? "true" : "false");
+          t.tabIndex = active ? 0 : -1;
+          if (panels[i]) panels[i].hidden = !active;
+        });
+        if (focus) tab.focus();
+      };
+      tabs.forEach(function (tab) {
+        tab.addEventListener("click", function () {
+          select(tab);
+        });
+      });
+      tablist.addEventListener("keydown", function (event) {
+        if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+        var current = tabs.indexOf(document.activeElement);
+        if (current === -1) return;
+        event.preventDefault();
+        var delta = event.key === "ArrowRight" ? 1 : tabs.length - 1;
+        select(tabs[(current + delta) % tabs.length], true);
+      });
+    }
+    wireSpecTabs();
+    document.addEventListener("astro:after-swap", wireSpecTabs);
+  })();
+</script>

@@ -23,6 +23,7 @@ import {
   type PgPoolLike,
   type PgSslOptions,
 } from './pg-engine.js';
+import { assertNoUrlSslOverride, collectUrlSslDirectives } from './pg-url-ssl.js';
 import type { DatabaseAdapter, DatabaseAdapterCapabilities } from '../types.js';
 
 export type PostgresAdapterOptions = {
@@ -64,6 +65,7 @@ const postgresCapabilities: DatabaseAdapterCapabilities = {
 };
 
 export function postgres(options: PostgresAdapterOptions): DatabaseAdapter<PgPoolLike> {
+  const id = 'postgres';
   if (!options.connectionString) {
     throw new Error('postgres: connectionString is required');
   }
@@ -85,10 +87,34 @@ export function postgres(options: PostgresAdapterOptions): DatabaseAdapter<PgPoo
     ...options.pool,
   };
 
+  // Review finding F3 (narrow form for this pass-through adapter): when the connection
+  // URL carries SSL directives (sslmode/ssl/sslcert/...) AND an explicit ssl
+  // configuration exists, pg's URL parser would silently REPLACE the configured ssl
+  // object (e.g. `?sslmode=disable` un-encrypts despite `{ rejectUnauthorized: true,
+  // ca }`; `?sslmode=require` silently discards the CA). Refuse that ambiguity before
+  // pool construction. URL directives alone keep native pg parsing — including the
+  // documented, safe `sslmode=verify-full` — and explicit plaintext configs stay allowed.
+  // Strings that `new URL` cannot parse (e.g. exotic pg-only forms) skip this check;
+  // pg's own parser handles them as before.
+  let parsedUrl: URL | null = null;
+  try {
+    parsedUrl = new URL(options.connectionString);
+  } catch {
+    parsedUrl = null;
+  }
+  if (parsedUrl !== null) {
+    assertNoUrlSslOverride({
+      adapter: id,
+      directives: collectUrlSslDirectives(parsedUrl),
+      explicitSsl: options.ssl,
+      poolSsl: options.pool?.ssl,
+    });
+  }
+
   const poolFactory = options.poolFactory ?? ((config) => new Pool(config) as unknown as PgPoolLike);
 
   return createPgEngine({
-    id: 'postgres',
+    id,
     poolFactory,
     poolConfig,
     capabilities: postgresCapabilities,

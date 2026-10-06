@@ -32,29 +32,55 @@
  * - List scope (Amendment A3): Neon addresses branch and database lists by path segments, so
  *   `ManagementListQuery` carries first-class `projectId`/`branchId` scope fields validated by
  *   the core client before dispatch.
+ *
+ * Amendment A4 expansion (2026-10-06, verified against the official spec):
+ * - Provider-defined kinds (A2 open-kinds mechanism): `role` (branch-scoped), `endpoint`
+ *   (compute; project-scoped), `snapshot` (project-scoped). No Postgres semantics are imposed
+ *   beyond what the official endpoints offer; role/endpoint/snapshot scope is carried in
+ *   `ref.scope` per the A2 rules.
+ * - Discovery: `organizations()` (GET /users/me/organizations) and `regions()` (GET /regions).
+ * - `connection(ref)`: GET /projects/{pid}/connection_uri — requires `databaseName` and
+ *   `roleName` (official endpoint requirement, never fabricated). URI returned redacted unless
+ *   `reveal: true`; revealed values surface only in `secrets`.
+ * - `resetCredential({kind:'role'})`: POST .../roles/{name}/reset_password (returns a new
+ *   one-time password in `secrets`). Neon has no project-password rotation endpoint.
+ * - `action()`: `start`/`suspend`/`restart` on `endpoint` (official compute lifecycle), and
+ *   `restore` on `branch` (POST .../branches/{bid}/restore) and `snapshot` (POST
+ *   .../snapshots/{sid}/restore → creates/updates a branch). `recover` for deleted projects is
+ *   left to `raw.recoverProject` (single-purpose official endpoint).
+ * - Honest gaps: no single-snapshot GET exists in the official API (list instead); role
+ *   passwords cannot be listed, only (re)generated or revealed via `raw.revealRolePassword`.
  */
 
 import { ManagementError } from './errors.js';
 import { createManagementHttp, redactRecord, redactText } from './http.js';
 import type {
   CreateBranchSpec,
+  CreateCustomSpec,
   CreateDatabaseSpec,
   CreateProjectSpec,
   CreateResourceSpec,
+  ManagementActionOptions,
   ManagementAdapter,
   ManagementAdapterCapabilities,
   ManagementCallOptions,
+  ManagementConnectionInfo,
+  ManagementConnectionInput,
   ManagementDeleteResult,
   FetchLike,
   ManagementListQuery,
   ManagementOperation,
+  ManagementOrganization,
   ManagementPage,
   ManagementProviderId,
+  ManagementRegion,
   ManagementResource,
   ManagementResourceKind,
+  ManagementScope,
   ManagementSecret,
   ManagementStatus,
   ManagementWriteResult,
+  ResetCredentialOptions,
   ResourceRef,
   UpdateResourceSpec,
 } from './types.js';
@@ -90,6 +116,24 @@ export type NeonManagementOptions = {
  */
 export type NeonManagementRaw = {
   connectionUri(input: NeonConnectionUriInput, callOptions?: ManagementCallOptions): Promise<string>;
+  /**
+   * `GET /projects/{projectId}/branches/{branchId}/roles/{roleName}/reveal_password` (official,
+   * verified against the spec). Returns the role's CURRENT password — the one secret Neon can
+   * recover after creation. The value is registered for error-message redaction; treat it like
+   * a password and never log it.
+   */
+  revealRolePassword(
+    input: { projectId: string; branchId: string; roleName: string },
+    callOptions?: ManagementCallOptions,
+  ): Promise<string>;
+  /**
+   * `POST /projects/{projectId}/recover` (official): recover a recently deleted project within
+   * Neon's recovery window. Response carries the recovered `project` and `branches`.
+   */
+  recoverProject(
+    projectId: string,
+    callOptions?: ManagementCallOptions,
+  ): Promise<ManagementResource>;
 };
 
 export type NeonConnectionUriInput = {
@@ -265,6 +309,82 @@ function mapDatabase(
   };
 }
 
+/** Map the official endpoint `current_state` enum (init | active | idle) truthfully. */
+function endpointStatus(currentState: unknown): { status: ManagementStatus; providerStatus: string | null } {
+  switch (currentState) {
+    case 'init':
+      return { status: 'creating', providerStatus: 'init' };
+    case 'active':
+      return { status: 'active', providerStatus: 'active' };
+    case 'idle':
+      // Idle = suspended (scaled to zero): the compute is stopped, not failed.
+      return { status: 'paused', providerStatus: 'idle' };
+    default:
+      return { status: 'unknown', providerStatus: asString(currentState) };
+  }
+}
+
+/**
+ * Map a custom-kind payload into a `ManagementResource`. Custom kinds carry their scope in
+ * `ref.scope`/`query.scope` (A2) exclusively; the first-class projectId/branchId fields belong
+ * to the known kinds, so the scope is preserved on `resource.scope` and never fabricated into
+ * projectId fields.
+ */
+function mapCustom(
+  kind: ManagementResourceKind,
+  id: string,
+  name: string | null,
+  raw: Record<string, unknown>,
+  scope: ManagementScope,
+  extra: { status?: ManagementStatus; providerStatus?: string | null } = {},
+): ManagementResource {
+  return {
+    kind,
+    providerId: PROVIDER_ID,
+    id,
+    name,
+    region: null,
+    status: extra.status ?? 'unknown',
+    providerStatus: extra.providerStatus ?? null,
+    createdAt: asString(raw['created_at']),
+    updatedAt: asString(raw['updated_at']),
+    scope: { ...scope },
+    raw,
+  };
+}
+
+function requireScope(
+  spec: CreateCustomSpec,
+  kind: 'role' | 'endpoint' | 'snapshot',
+  required: readonly string[],
+): ManagementScope {
+  const scope = spec.scope ?? {};
+  const missing = required.filter((field) => typeof scope[field] !== 'string' || scope[field] === '');
+  if (missing.length > 0) {
+    throw error(
+      `create('${kind}') requires the scope fields ${required.map((f) => `'${f}'`).join(', ')} on ` +
+        `spec.scope (Neon addresses these resources by path). Missing: ${missing.map((f) => `'${f}'`).join(', ')}.`,
+      'CONFIGURATION',
+      { resourceKind: kind },
+    );
+  }
+  return scope;
+}
+
+function requireScopeOnRef(ref: ResourceRef, kind: string, required: readonly string[]): ManagementScope {
+  const scope = ref.scope ?? {};
+  const missing = required.filter((field) => typeof scope[field] !== 'string' || scope[field] === '');
+  if (missing.length > 0) {
+    throw error(
+      `${kind} references require the scope fields ${required.map((f) => `'${f}'`).join(', ')} on ` +
+        `ref.scope (Neon addresses these resources by path). Missing: ${missing.map((f) => `'${f}'`).join(', ')}.`,
+      'CONFIGURATION',
+      { resourceKind: kind, resourceId: ref.id },
+    );
+  }
+  return scope;
+}
+
 // ---------------------------------------------------------------------------
 // Operations
 // ---------------------------------------------------------------------------
@@ -300,8 +420,10 @@ function pickPrimaryOperation(operations: readonly Record<string, unknown>[]): R
 /**
  * Keep the caller's `ref` when the polled operation payload is still consistent with it, so a
  * `wait()` on a database write result resolves the DATABASE (the operation payload only carries
- * `branch_id`, which would otherwise re-route the final get to the branch). Otherwise derive the
- * ref from the payload: branch-scoped when `branch_id` is present, project-scoped otherwise.
+ * `branch_id`, which would otherwise re-route the final get to the branch). Custom kinds
+ * (role/endpoint/snapshot) keep their caller's ref when the payload's project/branch ids match
+ * the declared scope. Otherwise derive the ref from the payload: branch-scoped when `branch_id`
+ * is present, project-scoped otherwise.
  */
 function refForOperation(
   payload: Record<string, unknown>,
@@ -310,17 +432,34 @@ function refForOperation(
   const projectId = asString(payload['project_id']);
   const branchId = asString(payload['branch_id']);
   if (existingRef !== null && projectId !== null) {
-    const consistent =
-      (existingRef.kind === 'project' && existingRef.id === projectId) ||
-      (existingRef.kind === 'branch' &&
-        branchId !== null &&
-        existingRef.id === branchId &&
-        existingRef.projectId === projectId) ||
-      (existingRef.kind === 'database' &&
-        branchId !== null &&
-        existingRef.projectId === projectId &&
-        existingRef.branchId === branchId);
-    if (consistent) return existingRef;
+    if (existingRef.kind === 'project' && existingRef.id === projectId) return existingRef;
+    if (
+      existingRef.kind === 'branch' &&
+      branchId !== null &&
+      existingRef.id === branchId &&
+      existingRef.projectId === projectId
+    ) {
+      return existingRef;
+    }
+    if (
+      existingRef.kind === 'database' &&
+      branchId !== null &&
+      existingRef.projectId === projectId &&
+      existingRef.branchId === branchId
+    ) {
+      return existingRef;
+    }
+    // Provider-defined kinds: scope lives on ref.scope (A2). Keep the ref when the payload's
+    // project matches and any branch scope the caller declared agrees with the payload.
+    if (
+      existingRef.kind !== 'project' &&
+      existingRef.kind !== 'branch' &&
+      existingRef.kind !== 'database' &&
+      existingRef.scope?.['projectId'] === projectId &&
+      (branchId === null || existingRef.scope['branchId'] === undefined || existingRef.scope['branchId'] === branchId)
+    ) {
+      return existingRef;
+    }
   }
   if (branchId !== null && projectId !== null) {
     return { kind: 'branch', id: branchId, projectId };
@@ -499,23 +638,42 @@ export function neonManagement(options: NeonManagementOptions): ManagementAdapte
   };
 
   const capabilities: ManagementAdapterCapabilities = {
-    resourceKinds: ['project', 'branch', 'database'],
+    // A4: `role`, `endpoint`, and `snapshot` are provider-defined kinds implemented through the
+    // A2 open-kinds mechanism (they are NOT known kinds; their scope lives in `ref.scope`).
+    resourceKinds: ['project', 'branch', 'database', 'role', 'endpoint', 'snapshot'],
     // Per-kind operation availability (A2): Neon supports real update and delete for every kind
-    // it manages; there are no provider-defined custom kinds, so nothing else is listed.
+    // it manages, EXCEPT roles (the official API has no role update endpoint) — roles support
+    // create/list/get/delete plus resetCredential.
     supported: {
-      update: ['project', 'branch', 'database'],
-      delete: ['project', 'branch', 'database'],
+      update: ['project', 'branch', 'database', 'endpoint', 'snapshot'],
+      delete: ['project', 'branch', 'database', 'role', 'endpoint', 'snapshot'],
+      connection: ['project', 'branch'],
+      resetCredential: ['role'],
+      actions: {
+        start: ['endpoint'],
+        suspend: ['endpoint'],
+        restart: ['endpoint'],
+        restore: ['branch', 'snapshot'],
+      },
     },
     // Per-resource truth (coordination/v2-neon-management.md §12): /projects and branch lists
     // paginate server-side; the database list does NOT. `pagination: true` covers project/branch,
-    // and list('database') refuses cursor/limit with CAPABILITY before dispatch.
+    // and list('database') refuses cursor/limit with CAPABILITY before dispatch. Role, endpoint,
+    // and snapshot lists are likewise unpaginated in the official API and refuse cursor/limit.
     pagination: true,
     asyncOperations: true,
-    // Status truth (A3): only branches expose a lifecycle status (`current_state`). Projects and
-    // databases have no status field, so wait() on a bare reference of those kinds is refused
-    // with CAPABILITY instead of hanging until the timeout budget; pass the write result or the
-    // operation so wait() polls Neon's operations endpoint.
-    statusPolling: ['branch'],
+    // Status truth (A3): only branches and compute endpoints expose a lifecycle state
+    // (`current_state`). Projects, databases, roles, and snapshots have no status field, so
+    // wait() on a bare reference of those kinds is refused with CAPABILITY instead of hanging
+    // until the timeout budget; pass the write result or the operation so wait() polls Neon's
+    // operations endpoint.
+    statusPolling: ['branch', 'endpoint'],
+    // A2 scope rules for the provider-defined kinds (enforced by the core before dispatch).
+    resourceScopes: {
+      role: ['projectId', 'branchId'],
+      endpoint: ['projectId'],
+      snapshot: ['projectId'],
+    },
     evidence: {
       resourceKinds: 'docs',
       'create:project': 'docs',
@@ -533,15 +691,49 @@ export function neonManagement(options: NeonManagementOptions): ManagementAdapte
       'get:database': 'docs',
       'update:database': 'docs',
       'delete:database': 'docs',
+      'create:role': 'docs',
+      'list:role': 'docs',
+      'get:role': 'docs',
+      'delete:role': 'docs',
+      'resetCredential:role': 'docs',
+      'create:endpoint': 'docs',
+      'list:endpoint': 'docs',
+      'get:endpoint': 'docs',
+      'update:endpoint': 'docs',
+      'delete:endpoint': 'docs',
+      'action:start:endpoint': 'docs',
+      'action:suspend:endpoint': 'docs',
+      'action:restart:endpoint': 'docs',
+      'create:snapshot': 'docs',
+      'list:snapshot': 'docs',
+      'update:snapshot': 'docs',
+      'delete:snapshot': 'docs',
+      'action:restore:branch': 'docs',
+      'action:restore:snapshot': 'docs',
+      organizations: 'docs',
+      regions: 'docs',
+      'connection:project': 'docs',
+      'connection:branch': 'docs',
       asyncOperations: 'docs',
       'pagination:project': 'docs',
       'pagination:branch': 'docs',
       connectionUri: 'docs',
+      revealRolePassword: 'docs',
+      recoverProject: 'docs',
     },
     prerequisites: {
       'create:database': ['owner'],
       'list:branch': ['projectId'],
       'list:database': ['projectId', 'branchId'],
+      'create:role': ['scope.projectId', 'scope.branchId', 'name'],
+      'list:role': ['scope.projectId', 'scope.branchId'],
+      'create:endpoint': ['scope.projectId', 'branchId', 'type'],
+      'list:endpoint': ['scope.projectId'],
+      'list:snapshot': ['scope.projectId'],
+      'create:snapshot': ['scope.projectId', 'branchId'],
+      'action:restore:branch': ['sourceBranchId (on action input)'],
+      'connection:project': ['databaseName', 'roleName'],
+      'connection:branch': ['databaseName', 'roleName'],
     },
   };
 
@@ -816,7 +1008,7 @@ export function neonManagement(options: NeonManagementOptions): ManagementAdapte
 
   // ---- get / update / delete ------------------------------------------------
 
-  async function get(ref: ResourceRef, callOptions?: ManagementCallOptions): Promise<ManagementResource> {
+  async function getKnown(ref: ResourceRef, callOptions?: ManagementCallOptions): Promise<ManagementResource> {
     if (ref.kind === 'project') {
       const response = await http.request(`/projects/${encodeSegment(ref.id)}`, { ...httpOptions(callOptions) });
       const payload = bodyRecord(response.body, 'get-project');
@@ -849,7 +1041,7 @@ export function neonManagement(options: NeonManagementOptions): ManagementAdapte
     });
   }
 
-  async function update(spec: UpdateResourceSpec, callOptions?: ManagementCallOptions): Promise<ManagementWriteResult> {
+  async function updateKnown(spec: UpdateResourceSpec, callOptions?: ManagementCallOptions): Promise<ManagementWriteResult> {
     const providerOptions = spec.patch.providerOptions ?? {};
     if (spec.kind !== 'project' && spec.kind !== 'branch' && spec.kind !== 'database') {
       throw error(
@@ -982,6 +1174,680 @@ export function neonManagement(options: NeonManagementOptions): ManagementAdapte
     };
   }
 
+  // ---- A4: provider-defined kinds (role / endpoint / snapshot) ---------------
+
+  function scopeFromQuery(
+    query: ManagementListQuery,
+    kind: 'role' | 'endpoint' | 'snapshot',
+    required: readonly string[],
+  ): ManagementScope {
+    const scope = query.scope ?? {};
+    const missing = required.filter((field) => typeof scope[field] !== 'string' || scope[field] === '');
+    if (missing.length > 0) {
+      throw error(
+        `list('${kind}') requires the scope fields ${required.map((f) => `'${f}'`).join(', ')} on ` +
+          `query.scope (Neon addresses these lists by path). Missing: ${missing.map((f) => `'${f}'`).join(', ')}.`,
+        'CONFIGURATION',
+        { resourceKind: kind },
+      );
+    }
+    return scope;
+  }
+
+  function refuseCustomPagination(kind: 'role' | 'endpoint' | 'snapshot', query: ManagementListQuery): void {
+    if (query.cursor !== undefined || query.limit !== undefined) {
+      throw error(
+        `list('${kind}') was called with cursor/limit, but Neon's ${kind} list endpoint is not ` +
+          'paginated and returns the full list. Omit cursor and limit.',
+        'CAPABILITY',
+        { resourceKind: kind },
+      );
+    }
+  }
+
+  /** Extract one-time role passwords (labelled `password:<name>` when named) before redaction. */
+  function roleSecrets(roles: readonly Record<string, unknown>[]): ManagementSecret[] {
+    const secrets: ManagementSecret[] = [];
+    roles.forEach((role, index) => {
+      const password = role['password'];
+      if (typeof password !== 'string' || password === '') return;
+      const name = asString(role['name']);
+      secrets.push({
+        label: name !== null ? `password:${name}` : `password:${index + 1}`,
+        value: password,
+      });
+    });
+    return secrets;
+  }
+
+  const registerRoleSecrets = (roles: readonly Record<string, unknown>[]): ManagementSecret[] => {
+    const secrets = roleSecrets(roles);
+    registerSecrets(secrets.map((secret) => secret.value));
+    return secrets;
+  };
+
+  async function createRole(
+    spec: CreateCustomSpec,
+    callOptions?: ManagementCallOptions,
+  ): Promise<ManagementWriteResult> {
+    const scope = requireScope(spec, 'role', ['projectId', 'branchId']);
+    const name = spec['name'];
+    if (typeof name !== 'string' || name === '') {
+      throw error("create('role') requires a non-empty name (the official body requires role.name).", 'CONFIGURATION', {
+        resourceKind: 'role',
+      });
+    }
+    const providerOptions = spec.providerOptions ?? {};
+    for (const key of Object.keys(providerOptions)) {
+      if (key !== 'no_login') {
+        throw error(
+          `create('role') providerOptions only accepts 'no_login' (the official RoleCreateRequest has ` +
+            `role.name and role.no_login). Got '${key}'.`,
+          'CONFIGURATION',
+          { resourceKind: 'role' },
+        );
+      }
+    }
+    const role: Record<string, unknown> = { name };
+    if (providerOptions['no_login'] !== undefined) role['no_login'] = providerOptions['no_login'];
+
+    const response = await http.request(
+      `/projects/${encodeSegment(scope['projectId']!)}/branches/${encodeSegment(scope['branchId']!)}/roles`,
+      { method: 'POST', body: { role }, ...httpOptions(callOptions) },
+    );
+    const payload = bodyRecord(response.body, 'create-role');
+    const rolePayload = recordField(payload, 'role', 'create-role');
+    const roleName = asString(rolePayload['name']) ?? name;
+    return {
+      resource: mapCustom('role', roleName, roleName, redactRecord(rolePayload), scope),
+      operation: operationFromCreateResponse(payload, { kind: 'role', id: roleName, scope }),
+      secrets: registerRoleSecrets([rolePayload]),
+      indeterminate: false,
+    };
+  }
+
+  async function listRoles(query: ManagementListQuery, callOptions?: ManagementCallOptions): Promise<ManagementPage> {
+    refuseCustomPagination('role', query);
+    const scope = scopeFromQuery(query, 'role', ['projectId', 'branchId']);
+    const response = await http.request(
+      `/projects/${encodeSegment(scope['projectId']!)}/branches/${encodeSegment(scope['branchId']!)}/roles`,
+      { ...httpOptions(callOptions) },
+    );
+    const payload = bodyRecord(response.body, 'list-roles');
+    const resources = arrayOf(payload['roles']).map((role) => {
+      const name = asString(role['name']);
+      if (name === null) throw error("Neon's role payload is missing a 'name'.", 'PROVIDER', { resourceKind: 'role' });
+      return mapCustom('role', name, name, redactRecord(role), scope);
+    });
+    return { kind: 'role', resources, cursor: null };
+  }
+
+  async function getRole(ref: ResourceRef, callOptions?: ManagementCallOptions): Promise<ManagementResource> {
+    const scope = requireScopeOnRef(ref, 'role', ['projectId', 'branchId']);
+    const response = await http.request(
+      `/projects/${encodeSegment(scope['projectId']!)}/branches/${encodeSegment(scope['branchId']!)}/roles/${encodeSegment(ref.id)}`,
+      { ...httpOptions(callOptions) },
+    );
+    const payload = bodyRecord(response.body, 'get-role');
+    const rolePayload = recordField(payload, 'role', 'get-role');
+    const name = asString(rolePayload['name']) ?? ref.id;
+    return mapCustom('role', name, name, redactRecord(rolePayload), scope);
+  }
+
+  async function deleteRole(ref: ResourceRef, callOptions?: ManagementCallOptions): Promise<ManagementDeleteResult> {
+    const scope = requireScopeOnRef(ref, 'role', ['projectId', 'branchId']);
+    const response = await http.request(
+      `/projects/${encodeSegment(scope['projectId']!)}/branches/${encodeSegment(scope['branchId']!)}/roles/${encodeSegment(ref.id)}`,
+      { method: 'DELETE', ...httpOptions(callOptions) },
+    );
+    const payload = bodyRecord(response.body, 'delete-role');
+    return { operation: operationFromCreateResponse(payload, ref), indeterminate: false };
+  }
+
+  async function createEndpoint(
+    spec: CreateCustomSpec,
+    callOptions?: ManagementCallOptions,
+  ): Promise<ManagementWriteResult> {
+    const scope = requireScope(spec, 'endpoint', ['projectId']);
+    const branchId = spec['branchId'];
+    const type = spec['type'];
+    if (typeof branchId !== 'string' || branchId === '') {
+      throw error(
+        "create('endpoint') requires branchId (the official EndpointCreateRequest requires endpoint.branch_id).",
+        'CONFIGURATION',
+        { resourceKind: 'endpoint' },
+      );
+    }
+    if (typeof type !== 'string' || type === '') {
+      throw error(
+        "create('endpoint') requires type ('read_write' | 'read_only'; the official EndpointCreateRequest " +
+          'requires endpoint.type).',
+        'CONFIGURATION',
+        { resourceKind: 'endpoint' },
+      );
+    }
+    const endpoint: Record<string, unknown> = { branch_id: branchId, type };
+    assignDefined(endpoint, spec.providerOptions ?? {});
+
+    const response = await http.request(`/projects/${encodeSegment(scope['projectId']!)}/endpoints`, {
+      method: 'POST',
+      body: { endpoint },
+      ...httpOptions(callOptions),
+    });
+    const payload = bodyRecord(response.body, 'create-endpoint');
+    const endpointPayload = recordField(payload, 'endpoint', 'create-endpoint');
+    const id = asString(endpointPayload['id']);
+    if (id === null) {
+      throw error("Neon's endpoint payload is missing an 'id'.", 'PROVIDER', { resourceKind: 'endpoint' });
+    }
+    const { status, providerStatus } = endpointStatus(endpointPayload['current_state']);
+    return {
+      resource: mapCustom('endpoint', id, asString(endpointPayload['name']), redactRecord(endpointPayload), scope, {
+        status,
+        providerStatus,
+      }),
+      operation: operationFromCreateResponse(payload, { kind: 'endpoint', id, scope }),
+      secrets: [],
+      indeterminate: false,
+    };
+  }
+
+  async function listEndpoints(query: ManagementListQuery, callOptions?: ManagementCallOptions): Promise<ManagementPage> {
+    refuseCustomPagination('endpoint', query);
+    const scope = scopeFromQuery(query, 'endpoint', ['projectId']);
+    const response = await http.request(`/projects/${encodeSegment(scope['projectId']!)}/endpoints`, {
+      ...httpOptions(callOptions),
+    });
+    const payload = bodyRecord(response.body, 'list-endpoints');
+    const resources = arrayOf(payload['endpoints']).map((endpointPayload) => {
+      const id = asString(endpointPayload['id']);
+      if (id === null) throw error("Neon's endpoint payload is missing an 'id'.", 'PROVIDER', { resourceKind: 'endpoint' });
+      const { status, providerStatus } = endpointStatus(endpointPayload['current_state']);
+      return mapCustom('endpoint', id, asString(endpointPayload['name']), redactRecord(endpointPayload), scope, {
+        status,
+        providerStatus,
+      });
+    });
+    return { kind: 'endpoint', resources, cursor: null };
+  }
+
+  async function getEndpoint(ref: ResourceRef, callOptions?: ManagementCallOptions): Promise<ManagementResource> {
+    const scope = requireScopeOnRef(ref, 'endpoint', ['projectId']);
+    const response = await http.request(
+      `/projects/${encodeSegment(scope['projectId']!)}/endpoints/${encodeSegment(ref.id)}`,
+      { ...httpOptions(callOptions) },
+    );
+    const payload = bodyRecord(response.body, 'get-endpoint');
+    const endpointPayload = recordField(payload, 'endpoint', 'get-endpoint');
+    const id = asString(endpointPayload['id']) ?? ref.id;
+    const { status, providerStatus } = endpointStatus(endpointPayload['current_state']);
+    return mapCustom('endpoint', id, asString(endpointPayload['name']), redactRecord(endpointPayload), scope, {
+      status,
+      providerStatus,
+    });
+  }
+
+  async function updateEndpoint(
+    spec: UpdateResourceSpec,
+    callOptions?: ManagementCallOptions,
+  ): Promise<ManagementWriteResult> {
+    const scope = requireScopeOnRef(
+      { kind: spec.kind, id: spec.id, scope: spec.scope },
+      'endpoint',
+      ['projectId'],
+    );
+    const providerOptions = spec.patch.providerOptions ?? {};
+    if (spec.patch.owner !== undefined) {
+      throw error("Compute endpoints have no 'owner' field.", 'CONFIGURATION', {
+        resourceKind: 'endpoint',
+        resourceId: spec.id,
+      });
+    }
+    if (spec.patch.name === undefined && isEmptyRecord(providerOptions)) {
+      throw error(
+        'update(endpoint) received an empty patch; pass name or providerOptions (e.g. disabled, ' +
+          'autoscaling_limit_min_cu, suspend_timeout_seconds).',
+        'CONFIGURATION',
+        { resourceKind: 'endpoint', resourceId: spec.id },
+      );
+    }
+    const endpoint: Record<string, unknown> = {};
+    if (spec.patch.name !== undefined) endpoint['name'] = spec.patch.name;
+    assignDefined(endpoint, providerOptions);
+    const response = await http.request(
+      `/projects/${encodeSegment(scope['projectId']!)}/endpoints/${encodeSegment(spec.id)}`,
+      { method: 'PATCH', body: { endpoint }, ...httpOptions(callOptions) },
+    );
+    const payload = bodyRecord(response.body, 'update-endpoint');
+    const endpointPayload = recordField(payload, 'endpoint', 'update-endpoint');
+    const id = asString(endpointPayload['id']) ?? spec.id;
+    const { status, providerStatus } = endpointStatus(endpointPayload['current_state']);
+    return {
+      resource: mapCustom('endpoint', id, asString(endpointPayload['name']), redactRecord(endpointPayload), scope, {
+        status,
+        providerStatus,
+      }),
+      operation: operationFromCreateResponse(payload, { kind: 'endpoint', id: spec.id, scope }),
+      secrets: [],
+      indeterminate: false,
+    };
+  }
+
+  async function deleteEndpoint(ref: ResourceRef, callOptions?: ManagementCallOptions): Promise<ManagementDeleteResult> {
+    const scope = requireScopeOnRef(ref, 'endpoint', ['projectId']);
+    const response = await http.request(
+      `/projects/${encodeSegment(scope['projectId']!)}/endpoints/${encodeSegment(ref.id)}`,
+      { method: 'DELETE', ...httpOptions(callOptions) },
+    );
+    const payload = bodyRecord(response.body, 'delete-endpoint');
+    return { operation: operationFromCreateResponse(payload, ref), indeterminate: false };
+  }
+
+  async function createSnapshot(
+    spec: CreateCustomSpec,
+    callOptions?: ManagementCallOptions,
+  ): Promise<ManagementWriteResult> {
+    const scope = requireScope(spec, 'snapshot', ['projectId']);
+    const branchId = spec['branchId'];
+    if (typeof branchId !== 'string' || branchId === '') {
+      throw error(
+        "create('snapshot') requires branchId (the official endpoint is branch-scoped: " +
+          'POST /projects/{projectId}/branches/{branchId}/snapshot).',
+        'CONFIGURATION',
+        { resourceKind: 'snapshot' },
+      );
+    }
+    const providerOptions = spec.providerOptions ?? {};
+    for (const key of Object.keys(providerOptions)) {
+      if (key !== 'name' && key !== 'lsn' && key !== 'timestamp' && key !== 'expires_at') {
+        throw error(
+          `create('snapshot') providerOptions only accepts 'name', 'lsn', 'timestamp', and ` +
+            `'expires_at' (the official endpoint takes these as query parameters). Got '${key}'.`,
+          'CONFIGURATION',
+          { resourceKind: 'snapshot' },
+        );
+      }
+    }
+    const response = await http.request(
+      `/projects/${encodeSegment(scope['projectId']!)}/branches/${encodeSegment(branchId)}/snapshot`,
+      {
+        method: 'POST',
+        query: {
+          name: typeof providerOptions['name'] === 'string' ? providerOptions['name'] : undefined,
+          lsn: typeof providerOptions['lsn'] === 'string' ? providerOptions['lsn'] : undefined,
+          timestamp: typeof providerOptions['timestamp'] === 'string' ? providerOptions['timestamp'] : undefined,
+          expires_at: typeof providerOptions['expires_at'] === 'string' ? providerOptions['expires_at'] : undefined,
+        },
+        ...httpOptions(callOptions),
+      },
+    );
+    const payload = bodyRecord(response.body, 'create-snapshot');
+    const snapshotPayload = recordField(payload, 'snapshot', 'create-snapshot');
+    const id = asString(snapshotPayload['id']);
+    if (id === null) {
+      throw error("Neon's snapshot payload is missing an 'id'.", 'PROVIDER', { resourceKind: 'snapshot' });
+    }
+    return {
+      resource: mapCustom('snapshot', id, asString(snapshotPayload['name']), redactRecord(snapshotPayload), scope),
+      operation: operationFromCreateResponse(payload, { kind: 'snapshot', id, scope }),
+      secrets: [],
+      indeterminate: false,
+    };
+  }
+
+  async function listSnapshots(query: ManagementListQuery, callOptions?: ManagementCallOptions): Promise<ManagementPage> {
+    refuseCustomPagination('snapshot', query);
+    const scope = scopeFromQuery(query, 'snapshot', ['projectId']);
+    const response = await http.request(`/projects/${encodeSegment(scope['projectId']!)}/snapshots`, {
+      ...httpOptions(callOptions),
+    });
+    const payload = bodyRecord(response.body, 'list-snapshots');
+    const resources = arrayOf(payload['snapshots']).map((snapshotPayload) => {
+      const id = asString(snapshotPayload['id']);
+      if (id === null) throw error("Neon's snapshot payload is missing an 'id'.", 'PROVIDER', { resourceKind: 'snapshot' });
+      return mapCustom('snapshot', id, asString(snapshotPayload['name']), redactRecord(snapshotPayload), scope);
+    });
+    return { kind: 'snapshot', resources, cursor: null };
+  }
+
+  async function updateSnapshot(
+    spec: UpdateResourceSpec,
+    callOptions?: ManagementCallOptions,
+  ): Promise<ManagementWriteResult> {
+    const scope = requireScopeOnRef({ kind: spec.kind, id: spec.id, scope: spec.scope }, 'snapshot', ['projectId']);
+    const providerOptions = spec.patch.providerOptions ?? {};
+    for (const key of Object.keys(providerOptions)) {
+      if (key !== 'name' && key !== 'expires_at') {
+        throw error(
+          `update('snapshot') providerOptions only accepts 'name' and 'expires_at' (the official ` +
+            `SnapshotUpdateRequest fields). Got '${key}'.`,
+          'CONFIGURATION',
+          { resourceKind: 'snapshot', resourceId: spec.id },
+        );
+      }
+    }
+    if (spec.patch.name === undefined && providerOptions['name'] === undefined && providerOptions['expires_at'] === undefined) {
+      throw error(
+        "update('snapshot') received an empty patch; pass name or providerOptions (name, expires_at).",
+        'CONFIGURATION',
+        { resourceKind: 'snapshot', resourceId: spec.id },
+      );
+    }
+    const snapshot: Record<string, unknown> = {};
+    if (spec.patch.name !== undefined) snapshot['name'] = spec.patch.name;
+    if (providerOptions['name'] !== undefined) snapshot['name'] = providerOptions['name'];
+    if (providerOptions['expires_at'] !== undefined) snapshot['expires_at'] = providerOptions['expires_at'];
+    const response = await http.request(
+      `/projects/${encodeSegment(scope['projectId']!)}/snapshots/${encodeSegment(spec.id)}`,
+      { method: 'PATCH', body: { snapshot }, ...httpOptions(callOptions) },
+    );
+    const payload = bodyRecord(response.body, 'update-snapshot');
+    const snapshotPayload = recordField(payload, 'snapshot', 'update-snapshot');
+    const id = asString(snapshotPayload['id']) ?? spec.id;
+    return {
+      resource: mapCustom('snapshot', id, asString(snapshotPayload['name']), redactRecord(snapshotPayload), scope),
+      operation: null,
+      secrets: [],
+      indeterminate: false,
+    };
+  }
+
+  async function deleteSnapshot(ref: ResourceRef, callOptions?: ManagementCallOptions): Promise<ManagementDeleteResult> {
+    const scope = requireScopeOnRef(ref, 'snapshot', ['projectId']);
+    const response = await http.request(
+      `/projects/${encodeSegment(scope['projectId']!)}/snapshots/${encodeSegment(ref.id)}`,
+      { method: 'DELETE', ...httpOptions(callOptions) },
+    );
+    const payload = bodyRecord(response.body, 'delete-snapshot');
+    return { operation: operationFromCreateResponse(payload, ref), indeterminate: false };
+  }
+
+  // ---- A4: discovery, connection, actions, credentials ----------------------
+
+  async function listOrganizations(callOptions?: ManagementCallOptions): Promise<readonly ManagementOrganization[]> {
+    const response = await http.request('/users/me/organizations', { ...httpOptions(callOptions) });
+    const payload = bodyRecord(response.body, 'list-organizations');
+    return arrayOf(payload['organizations']).map((org) => {
+      const id = asString(org['id']);
+      if (id === null) throw error("Neon's organization payload is missing an 'id'.", 'PROVIDER');
+      return {
+        providerId: PROVIDER_ID,
+        id,
+        name: asString(org['name']),
+        aliasId: asString(org['handle']),
+        raw: redactRecord(org),
+      };
+    });
+  }
+
+  async function listRegions(
+    input: { organizationId?: string },
+    callOptions?: ManagementCallOptions,
+  ): Promise<readonly ManagementRegion[]> {
+    // GET /regions accepts an optional org_id query param ("recommended for accurate region
+    // availability"). A caller-supplied organizationId is passed through verbatim; omitting it
+    // stays valid per the official endpoint.
+    const response = await http.request('/regions', {
+      query: { org_id: input?.organizationId },
+      ...httpOptions(callOptions),
+    });
+    const payload = bodyRecord(response.body, 'list-regions');
+    return arrayOf(payload['regions']).map((region) => {
+      const id = asString(region['region_id']);
+      if (id === null) throw error("Neon's region payload is missing a 'region_id'.", 'PROVIDER');
+      return {
+        providerId: PROVIDER_ID,
+        id,
+        name: asString(region['name']),
+        platform: asString(region['platform']),
+        default: typeof region['default'] === 'boolean' ? region['default'] : null,
+        raw: redactRecord(region),
+      };
+    });
+  }
+
+  async function connectionInfo(
+    ref: ResourceRef,
+    input: ManagementConnectionInput,
+    callOptions?: ManagementCallOptions,
+  ): Promise<ManagementConnectionInfo> {
+    if (ref.kind !== 'project' && ref.kind !== 'branch') {
+      throw error(
+        `connection is not supported for kind '${String(ref.kind)}' by the 'neon' adapter: the ` +
+          'official connection_uri endpoint addresses projects and branches only.',
+        'CAPABILITY',
+        { resourceKind: ref.kind, resourceId: ref.id },
+      );
+    }
+    if (typeof input.databaseName !== 'string' || input.databaseName === '') {
+      throw error(
+        'connection() on Neon requires databaseName: the official GET /projects/{id}/connection_uri ' +
+          'endpoint requires database_name. Never guessed, never fabricated.',
+        'CONFIGURATION',
+        { resourceKind: ref.kind, resourceId: ref.id },
+      );
+    }
+    if (typeof input.roleName !== 'string' || input.roleName === '') {
+      throw error(
+        'connection() on Neon requires roleName: the official GET /projects/{id}/connection_uri ' +
+          'endpoint requires role_name. Never guessed, never fabricated.',
+        'CONFIGURATION',
+        { resourceKind: ref.kind, resourceId: ref.id },
+      );
+    }
+    const projectId = ref.kind === 'project' ? ref.id : ref.projectId!;
+    const response = await http.request(`/projects/${encodeSegment(projectId)}/connection_uri`, {
+      query: {
+        branch_id: ref.kind === 'branch' ? ref.id : undefined,
+        database_name: input.databaseName,
+        role_name: input.roleName,
+        pooled: input.pooled === undefined ? undefined : input.pooled ? 'true' : 'false',
+      },
+      ...httpOptions(callOptions),
+    });
+    const payload = bodyRecord(response.body, 'connection_uri');
+    const uri = payload['uri'];
+    if (typeof uri !== 'string' || uri === '') {
+      throw error("Neon's connection_uri response is missing the 'uri' string.", 'PROVIDER', {
+        resourceKind: ref.kind,
+        resourceId: ref.id,
+      });
+    }
+    // Parse the provider-selected host/port from the real URI (never invented; null when the
+    // URI cannot be parsed). The returned URI is password-REDACTED; the credential-bearing
+    // value surfaces only in `secrets` on the explicit `reveal: true` opt-in.
+    let host: string | null = null;
+    let port: number | null = null;
+    try {
+      const parsed = new URL(uri);
+      host = parsed.hostname !== '' ? parsed.hostname : null;
+      port = parsed.port !== '' ? Number(parsed.port) : null;
+    } catch {
+      host = null;
+      port = null;
+    }
+    let secrets: ManagementSecret[] = [];
+    if (input.reveal === true) {
+      secrets = [{ label: 'connectionString', value: uri }];
+      registerSecrets(secrets.map((secret) => secret.value));
+    }
+    return {
+      providerId: PROVIDER_ID,
+      kind: ref.kind,
+      id: ref.id,
+      projectId: ref.kind === 'project' ? ref.id : ref.projectId ?? null,
+      branchId: ref.kind === 'branch' ? ref.id : null,
+      host,
+      port,
+      database: input.databaseName ?? null,
+      role: input.roleName ?? null,
+      pooled: input.pooled ?? null,
+      redactedUri: redactConnectionUri(uri),
+      secrets,
+      raw: {},
+    };
+  }
+
+  async function performAction(
+    ref: ResourceRef,
+    action: string,
+    options: ManagementActionOptions,
+  ): Promise<ManagementWriteResult> {
+    const input = options.input ?? {};
+    if (ref.kind === 'endpoint') {
+      const scope = requireScopeOnRef(ref, 'endpoint', ['projectId']);
+      if (action !== 'start' && action !== 'suspend' && action !== 'restart') {
+        throw error(
+          `action '${action}' is not supported for kind 'endpoint' by the 'neon' adapter. Supported ` +
+            "endpoint actions: 'start', 'suspend', 'restart' (official compute lifecycle endpoints).",
+          'CAPABILITY',
+          { resourceKind: 'endpoint', resourceId: ref.id },
+        );
+      }
+      const response = await http.request(
+        `/projects/${encodeSegment(scope['projectId']!)}/endpoints/${encodeSegment(ref.id)}/${action}`,
+        { method: 'POST', ...httpOptions(options) },
+      );
+      const payload = bodyRecord(response.body, `endpoint-${action}`);
+      const endpointPayload = recordField(payload, 'endpoint', `endpoint-${action}`);
+      const id = asString(endpointPayload['id']) ?? ref.id;
+      const { status, providerStatus } = endpointStatus(endpointPayload['current_state']);
+      return {
+        resource: mapCustom('endpoint', id, asString(endpointPayload['name']), redactRecord(endpointPayload), scope, {
+          status,
+          providerStatus,
+        }),
+        operation: operationFromCreateResponse(payload, { kind: 'endpoint', id: ref.id, scope }),
+        secrets: [],
+        indeterminate: false,
+      };
+    }
+    if (ref.kind === 'branch' && action === 'restore') {
+      const sourceBranchId = input['sourceBranchId'] ?? input['source_branch_id'];
+      if (typeof sourceBranchId !== 'string' || sourceBranchId === '') {
+        throw error(
+          "action 'restore' on a Neon branch requires input.sourceBranchId (the official " +
+            'BranchRestoreRequest requires source_branch_id). Pass sourceBranchId, plus optional ' +
+            'sourceLsn/sourceTimestamp for point-in-time restores and preserveUnderName when the ' +
+            'branch has children.',
+          'CONFIGURATION',
+          { resourceKind: 'branch', resourceId: ref.id },
+        );
+      }
+      // Official BranchRestoreRequest fields: source_branch_id (required), source_lsn,
+      // source_timestamp, preserve_under_name (required by Neon when the branch has children or
+      // the source is the branch itself). Unknown input keys are rejected, never silently dropped.
+      const preserveUnderName = input['preserveUnderName'] ?? input['preserve_under_name'];
+      const unknownKeys = Object.keys(input).filter(
+        (key) =>
+          !['sourceBranchId', 'source_branch_id', 'sourceLsn', 'source_lsn', 'sourceTimestamp', 'source_timestamp', 'preserveUnderName', 'preserve_under_name'].includes(key),
+      );
+      if (unknownKeys.length > 0) {
+        throw error(
+          `action 'restore' on a Neon branch accepts only sourceBranchId, sourceLsn, ` +
+            `sourceTimestamp, and preserveUnderName (official BranchRestoreRequest fields). ` +
+            `Got unknown input keys: ${unknownKeys.map((k) => `'${k}'`).join(', ')}.`,
+          'CONFIGURATION',
+          { resourceKind: 'branch', resourceId: ref.id },
+        );
+      }
+      const body: Record<string, unknown> = {
+        source_branch_id: sourceBranchId,
+        ...(typeof input['sourceLsn'] === 'string' ? { source_lsn: input['sourceLsn'] } : {}),
+        ...(typeof input['sourceTimestamp'] === 'string' ? { source_timestamp: input['sourceTimestamp'] } : {}),
+        ...(typeof preserveUnderName === 'string' ? { preserve_under_name: preserveUnderName } : {}),
+      };
+      const response = await http.request(
+        `/projects/${encodeSegment(ref.projectId!)}/branches/${encodeSegment(ref.id)}/restore`,
+        { method: 'POST', body, ...httpOptions(options) },
+      );
+      const payload = bodyRecord(response.body, 'branch-restore');
+      const branchPayload = recordField(payload, 'branch', 'branch-restore');
+      const branchId = asString(branchPayload['id']) ?? ref.id;
+      return {
+        resource: mapBranch(branchPayload, redactRecord(payload), ref.projectId!),
+        operation: operationFromCreateResponse(payload, { kind: 'branch', id: branchId, projectId: ref.projectId }),
+        secrets: [],
+        indeterminate: false,
+      };
+    }
+    if (ref.kind === 'snapshot' && action === 'restore') {
+      const scope = requireScopeOnRef(ref, 'snapshot', ['projectId']);
+      const body: Record<string, unknown> = {
+        ...(typeof input['name'] === 'string' ? { name: input['name'] } : {}),
+        ...(typeof input['targetBranchId'] === 'string' ? { target_branch_id: input['targetBranchId'] } : {}),
+        ...(input['target_branch_id'] !== undefined ? { target_branch_id: input['target_branch_id'] } : {}),
+        ...(typeof input['finalizeRestore'] === 'boolean' ? { finalize_restore: input['finalizeRestore'] } : {}),
+      };
+      const response = await http.request(
+        `/projects/${encodeSegment(scope['projectId']!)}/snapshots/${encodeSegment(ref.id)}/restore`,
+        { method: 'POST', body, ...httpOptions(options) },
+      );
+      const payload = bodyRecord(response.body, 'snapshot-restore');
+      const branchPayload = recordField(payload, 'branch', 'snapshot-restore');
+      const branchId = asString(branchPayload['id']);
+      if (branchId === null) {
+        throw error("Neon's snapshot restore response is missing branch.id.", 'PROVIDER', {
+          resourceKind: 'snapshot',
+          resourceId: ref.id,
+        });
+      }
+      return {
+        resource: mapBranch(branchPayload, redactRecord(payload), scope['projectId']!),
+        operation: operationFromCreateResponse(payload, {
+          kind: 'branch',
+          id: branchId,
+          projectId: scope['projectId'],
+        }),
+        secrets: [],
+        indeterminate: false,
+      };
+    }
+    throw error(
+      `action '${action}' is not supported for kind '${String(ref.kind)}' by the 'neon' adapter. ` +
+        "Supported: 'start'/'suspend'/'restart' on 'endpoint', 'restore' on 'branch' and 'snapshot'.",
+      'CAPABILITY',
+      { resourceKind: ref.kind, resourceId: ref.id },
+    );
+  }
+
+  async function resetRoleCredential(
+    ref: ResourceRef,
+    options: ResetCredentialOptions,
+  ): Promise<ManagementWriteResult> {
+    if (ref.kind !== 'role') {
+      throw error(
+        `resetCredential is not supported for kind '${String(ref.kind)}' by the 'neon' adapter: ` +
+          "Neon rotates role passwords via POST .../roles/{role_name}/reset_password (kind 'role'). " +
+          'Neon has no project-password rotation endpoint.',
+        'CAPABILITY',
+        { resourceKind: ref.kind, resourceId: ref.id },
+      );
+    }
+    if (options.password !== undefined) {
+      throw error(
+        'Neon generates the new role password server-side; the official reset_password endpoint takes ' +
+          'no body. Omit password and read the returned one-time value from the result secrets.',
+        'CONFIGURATION',
+        { resourceKind: 'role', resourceId: ref.id },
+      );
+    }
+    const scope = requireScopeOnRef(ref, 'role', ['projectId', 'branchId']);
+    const response = await http.request(
+      `/projects/${encodeSegment(scope['projectId']!)}/branches/${encodeSegment(scope['branchId']!)}/roles/${encodeSegment(ref.id)}/reset_password`,
+      { method: 'POST', ...httpOptions(options) },
+    );
+    const payload = bodyRecord(response.body, 'reset-password');
+    const rolePayload = recordField(payload, 'role', 'reset-password');
+    const roleName = asString(rolePayload['name']) ?? ref.id;
+    return {
+      resource: mapCustom('role', roleName, roleName, redactRecord(rolePayload), scope),
+      operation: operationFromCreateResponse(payload, ref),
+      secrets: registerRoleSecrets([rolePayload]),
+      indeterminate: false,
+    };
+  }
+
   // ---- raw escape hatch ------------------------------------------------------
 
   async function connectionUri(
@@ -1012,12 +1878,56 @@ export function neonManagement(options: NeonManagementOptions): ManagementAdapte
       throw error("Neon's connection_uri response is missing the 'uri' string.", 'PROVIDER');
     }
     // The URI embeds the role password. Default output is REDACTED; returning the real
-    // credentials requires the explicit `reveal: true` opt-in. Either way the adapter never
-    // stores or logs the value.
+    // credentials requires the explicit `reveal: true` opt-in. The revealed value is registered
+    // for error-message redaction either way; the adapter never stores or logs it.
+    if (input.reveal === true) registerSecrets([uri]);
     return input.reveal === true ? uri : redactConnectionUri(uri);
   }
 
-  const raw: NeonManagementRaw = { connectionUri };
+  async function revealRolePassword(
+    input: { projectId: string; branchId: string; roleName: string },
+    callOptions?: ManagementCallOptions,
+  ): Promise<string> {
+    if (typeof input?.projectId !== 'string' || input.projectId === '') {
+      throw error('raw.revealRolePassword requires projectId.', 'CONFIGURATION', { resourceKind: 'role' });
+    }
+    if (typeof input?.branchId !== 'string' || input.branchId === '') {
+      throw error('raw.revealRolePassword requires branchId.', 'CONFIGURATION', { resourceKind: 'role' });
+    }
+    if (typeof input?.roleName !== 'string' || input.roleName === '') {
+      throw error('raw.revealRolePassword requires roleName.', 'CONFIGURATION', { resourceKind: 'role' });
+    }
+    const response = await http.request(
+      `/projects/${encodeSegment(input.projectId)}/branches/${encodeSegment(input.branchId)}/roles/${encodeSegment(input.roleName)}/reveal_password`,
+      { ...httpOptions(callOptions) },
+    );
+    const payload = bodyRecord(response.body, 'reveal-password');
+    const password = payload['password'];
+    if (typeof password !== 'string' || password === '') {
+      throw error("Neon's reveal_password response is missing the 'password' string.", 'PROVIDER', {
+        resourceKind: 'role',
+      });
+    }
+    // Register the recovered value so every later error message scrubs it. The adapter never
+    // stores or logs it.
+    registerSecrets([password]);
+    return password;
+  }
+
+  async function recoverProject(projectId: string, callOptions?: ManagementCallOptions): Promise<ManagementResource> {
+    if (typeof projectId !== 'string' || projectId === '') {
+      throw error('raw.recoverProject requires projectId.', 'CONFIGURATION', { resourceKind: 'project' });
+    }
+    const response = await http.request(`/projects/${encodeSegment(projectId)}/recover`, {
+      method: 'POST',
+      ...httpOptions(callOptions),
+    });
+    const payload = bodyRecord(response.body, 'recover-project');
+    const projectPayload = recordField(payload, 'project', 'recover-project');
+    return mapProject(projectPayload, redactRecord(payload));
+  }
+
+  const raw: NeonManagementRaw = { connectionUri, revealRolePassword, recoverProject };
 
   const adapter: ManagementAdapter<NeonManagementRaw> = {
     id: PROVIDER_ID,
@@ -1029,11 +1939,15 @@ export function neonManagement(options: NeonManagementOptions): ManagementAdapte
       if (spec.kind === 'project') return createProject(spec as CreateProjectSpec, callOptions);
       if (spec.kind === 'branch') return createBranch(spec as CreateBranchSpec, callOptions);
       if (spec.kind === 'database') return createDatabase(spec as CreateDatabaseSpec, callOptions);
-      // Neon has no provider-defined kinds; the core client already refuses them, and the
+      // Provider-defined kinds (A2/A4): role, endpoint, snapshot.
+      if (spec.kind === 'role') return createRole(spec as CreateCustomSpec, callOptions);
+      if (spec.kind === 'endpoint') return createEndpoint(spec as CreateCustomSpec, callOptions);
+      if (spec.kind === 'snapshot') return createSnapshot(spec as CreateCustomSpec, callOptions);
+      // Neon has no other provider-defined kinds; the core client already refuses them, and the
       // adapter refuses them too so direct adapter use cannot invent an endpoint.
       throw error(
         `create is not supported for kind '${String(spec.kind)}' by the 'neon' adapter. ` +
-          "Neon manages 'project', 'branch', and 'database' only.",
+          "Neon manages 'project', 'branch', 'database', 'role', 'endpoint', and 'snapshot' only.",
         'CAPABILITY',
         { resourceKind: spec.kind as ManagementResourceKind },
       );
@@ -1042,17 +1956,68 @@ export function neonManagement(options: NeonManagementOptions): ManagementAdapte
       if (kind === 'project') return listProjects(query, callOptions);
       if (kind === 'branch') return listBranches(query, callOptions);
       if (kind === 'database') return listDatabases(query, callOptions);
+      if (kind === 'role') return listRoles(query, callOptions);
+      if (kind === 'endpoint') return listEndpoints(query, callOptions);
+      if (kind === 'snapshot') return listSnapshots(query, callOptions);
       throw error(
         `list is not supported for kind '${String(kind)}' by the 'neon' adapter. ` +
-          "Neon manages 'project', 'branch', and 'database' only.",
+          "Neon manages 'project', 'branch', 'database', 'role', 'endpoint', and 'snapshot' only.",
         'CAPABILITY',
         { resourceKind: kind },
       );
     },
-    get,
-    update,
-    delete: remove,
+    async get(ref: ResourceRef, callOptions?: ManagementCallOptions): Promise<ManagementResource> {
+      if (ref.kind === 'project') return getKnown(ref, callOptions);
+      if (ref.kind === 'branch') return getKnown(ref, callOptions);
+      if (ref.kind === 'database') return getKnown(ref, callOptions);
+      if (ref.kind === 'role') return getRole(ref, callOptions);
+      if (ref.kind === 'endpoint') return getEndpoint(ref, callOptions);
+      // The official API has no single-snapshot GET (only list/PATCH/DELETE/restore).
+      if (ref.kind === 'snapshot') {
+        throw error(
+          "get is not available for kind 'snapshot': the official Neon API has no single-snapshot " +
+            "read endpoint (only list, PATCH, DELETE, and restore). Use list('snapshot', ...).",
+          'CAPABILITY',
+          { resourceKind: 'snapshot', resourceId: ref.id },
+        );
+      }
+      throw error(
+        `get is not supported for kind '${String(ref.kind)}' by the 'neon' adapter. ` +
+          "Neon manages 'project', 'branch', 'database', 'role', 'endpoint', and 'snapshot' only.",
+        'CAPABILITY',
+        { resourceKind: ref.kind, resourceId: ref.id },
+      );
+    },
+    async update(spec: UpdateResourceSpec, callOptions?: ManagementCallOptions): Promise<ManagementWriteResult> {
+      if (spec.kind === 'project' || spec.kind === 'branch' || spec.kind === 'database') return updateKnown(spec, callOptions);
+      if (spec.kind === 'endpoint') return updateEndpoint(spec, callOptions);
+      if (spec.kind === 'snapshot') return updateSnapshot(spec, callOptions);
+      throw error(
+        `update is not supported for kind '${String(spec.kind)}' by the 'neon' adapter. ` +
+          "Kinds supporting update: 'project', 'branch', 'database', 'endpoint', 'snapshot' " +
+          "(the official API has no role update endpoint).",
+        'CAPABILITY',
+        { resourceKind: spec.kind, resourceId: spec.id },
+      );
+    },
+    async delete(ref: ResourceRef, callOptions?: ManagementCallOptions): Promise<ManagementDeleteResult> {
+      if (ref.kind === 'project' || ref.kind === 'branch' || ref.kind === 'database') return remove(ref, callOptions);
+      if (ref.kind === 'role') return deleteRole(ref, callOptions);
+      if (ref.kind === 'endpoint') return deleteEndpoint(ref, callOptions);
+      if (ref.kind === 'snapshot') return deleteSnapshot(ref, callOptions);
+      throw error(
+        `delete is not supported for kind '${String(ref.kind)}' by the 'neon' adapter. ` +
+          "Neon manages 'project', 'branch', 'database', 'role', 'endpoint', and 'snapshot' only.",
+        'CAPABILITY',
+        { resourceKind: ref.kind, resourceId: ref.id },
+      );
+    },
     getOperation,
+    organizations: listOrganizations,
+    regions: listRegions,
+    connection: connectionInfo,
+    action: performAction,
+    resetCredential: resetRoleCredential,
     raw,
   };
 

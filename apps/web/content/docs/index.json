@@ -13,8 +13,8 @@
       "https://database-sdk.dev"
     ],
     "engine": "postgresql",
-    "license": "MIT",
-    "scope": "Management (control plane) plus the typed PostgreSQL query client. Bring a provider credential (Supabase PAT, Neon API key); there is no central dbSDK backend."
+    "license": "Apache-2.0",
+    "scope": "Management (control plane), the typed PostgreSQL query client, one-way resumable sync between databases (dbsdk/sync), and optional Drizzle ORM interoperability (dbsdk/drizzle). Bring a provider credential (Supabase PAT, Neon API key, PlanetScale service token); there is no central dbSDK backend."
   },
   "pages": [
     {
@@ -66,52 +66,70 @@
       "order": 8
     },
     {
+      "slug": "docs/adapters/planetscale",
+      "title": "PlanetScale Postgres adapter",
+      "description": "PlanetScale Postgres over the standard pg wire protocol: mandatory verified TLS, direct and pooled modes with explicit guards, and the service-token management adapter.",
+      "order": 9
+    },
+    {
       "slug": "docs/testing",
       "title": "Testing",
       "description": "Fixture adapters with zero credentials for query and management; what fixtures can and cannot prove.",
-      "order": 9
+      "order": 10
     },
     {
       "slug": "docs/frameworks",
       "title": "Frameworks",
       "description": "Express, Next.js, and serverless lifetime patterns.",
-      "order": 10
+      "order": 11
     },
     {
       "slug": "docs/switching",
       "title": "Switching providers",
       "description": "What carries over between adapters; data never moves automatically.",
-      "order": 11
+      "order": 12
     },
     {
       "slug": "docs/management",
       "title": "Management",
       "description": "The control plane: createManagement, provider factories, create/list/get/update/delete/wait, secrets, bounded waiting, ManagementError.",
-      "order": 12
+      "order": 13
     },
     {
       "slug": "docs/credentials",
       "title": "Credentials",
       "description": "Management credentials versus SQL connection strings, per provider, and why they are never interchangeable.",
-      "order": 13
+      "order": 14
+    },
+    {
+      "slug": "docs/sync",
+      "title": "Sync",
+      "description": "One-way resumable transfer between databases through dbsdk/sync: keyset sources, upsert targets, caller-owned checkpoints, honest failure and limits.",
+      "order": 15
+    },
+    {
+      "slug": "docs/drizzle",
+      "title": "Drizzle",
+      "description": "Optional Drizzle ORM interoperability over dbSDK-owned connections: typed schema queries on the same pool, with lifetime, TLS, and pooler guards preserved.",
+      "order": 16
     },
     {
       "slug": "docs/mcp",
       "title": "MCP server",
       "description": "The site's read-only MCP documentation server: endpoint, tools, resources, and client configuration.",
-      "order": 14
+      "order": 17
     },
     {
       "slug": "docs/installation",
       "title": "Installation",
       "description": "Local clone, build, pack, and consumer setup; npm is not published.",
-      "order": 15
+      "order": 18
     },
     {
       "slug": "docs/faq",
       "title": "FAQ",
       "description": "Scope, safety, evidence, and the things dbSDK does and does not do.",
-      "order": 16
+      "order": 19
     }
   ],
   "entrypoints": [
@@ -143,8 +161,22 @@
       "driver": "@neondatabase/serverless"
     },
     {
+      "import": "dbsdk/planetscale",
+      "driver": "pg"
+    },
+    {
       "import": "dbsdk/testing",
       "driver": null
+    },
+    {
+      "import": "dbsdk/sync",
+      "exposes": [
+        "runTransfer",
+        "createMemoryCheckpointStore",
+        "createSqlSource",
+        "createSqlTarget"
+      ],
+      "notes": "One-way resumable transfer. Explicit stable identity required on both SQL adapters; uniqueOrder verify (pg_catalog preflight) by default."
     },
     {
       "import": "dbsdk/management",
@@ -164,6 +196,11 @@
       "import": "dbsdk/management/neon",
       "factory": "neonManagement",
       "credential": "Neon API key (apiKey)"
+    },
+    {
+      "import": "dbsdk/management/planetscale",
+      "factory": "planetscaleManagement",
+      "credential": "PlanetScale service token (tokenId + tokenSecret; Authorization: <id>:<secret>, no Bearer)"
     },
     {
       "import": "dbsdk/management/testing",
@@ -233,6 +270,26 @@
         "transport": "http or websocket"
       },
       "evidence": "flags: docs; HTTP behavior additionally verified against the real Neon HTTP protocol via local proxy; websocket/postgres transports fixture-tested"
+    },
+    {
+      "id": "planetscale",
+      "factory": "planetscale",
+      "import": "dbsdk/planetscale",
+      "transports": [
+        "tcp"
+      ],
+      "modes": [
+        "direct",
+        "pooled"
+      ],
+      "capabilities": {
+        "interactiveTransactions": true,
+        "atomicBatch": true,
+        "sessionState": "dedicated-session-only; refused-before-dispatch on pooled mode for session-state statements and multi-statement strings",
+        "transport": "tcp"
+      },
+      "notes": "Mandatory verified TLS on remote hosts (system trust store); connection-string SSL directives are canonicalized and stripped so pg cannot override the resolved policy; the only downgrade path is an explicit ssl:{rejectUnauthorized:false} option, and remote plaintext is refused. connectionMode must match the endpoint port (direct 5432, PgBouncer pooled 6432); mismatches are refused unless allowModeMismatch. Localhost defaults to no TLS. Only PlanetScale Postgres: Vitess/MySQL and Neki are separate systems.",
+      "evidence": "flags: docs; behavior additionally verified against a real local server (wire protocol, TLS config resolution, pooled guards)"
     }
   ],
   "managementAdapters": [
@@ -244,27 +301,58 @@
       "kinds": [
         "project",
         "branch",
-        "database"
+        "database",
+        "role",
+        "endpoint",
+        "snapshot"
       ],
       "capabilities": {
         "update": [
           "project",
           "branch",
-          "database"
+          "database",
+          "endpoint",
+          "snapshot"
         ],
         "delete": [
           "project",
           "branch",
-          "database"
+          "database",
+          "role",
+          "endpoint",
+          "snapshot"
         ],
         "pagination": "projects and branches paginate; the database list does not",
         "asyncOperations": true,
         "statusPolling": [
+          "branch",
+          "endpoint"
+        ],
+        "connection": [
+          "project",
           "branch"
         ],
-        "listScope": "branch lists require projectId on the query; database lists require projectId and branchId (typed on ManagementListQuery)"
+        "resetCredential": [
+          "role"
+        ],
+        "actions": {
+          "start": [
+            "endpoint"
+          ],
+          "suspend": [
+            "endpoint"
+          ],
+          "restart": [
+            "endpoint"
+          ],
+          "restore": [
+            "branch",
+            "snapshot"
+          ]
+        },
+        "listScope": "branch lists require projectId on the query; database lists require projectId and branchId (typed on ManagementListQuery); role lists require projectId and branchId scope"
       },
-      "notes": "Databases are branch-scoped and addressed by name. Create responses carry connection URIs and role passwords; they surface only via secrets and are redacted from raw payloads. raw.connectionUri retrieves an official connection URI, password redacted unless reveal: true. wait() on a bare project or database ref is refused with CAPABILITY (no status field); pass the write result or operation.",
+      "notes": "Databases are branch-scoped and addressed by name. Provider-defined kinds: role (branch-scoped Postgres credentials; no update — the official API has no role PATCH), endpoint (branch compute; create requires branchId and type; start/suspend/restart actions), snapshot (no single GET in the official API; restore returns the restored branch). Create responses carry connection URIs and role passwords; they surface only via secrets and are redacted from raw payloads. connection() requires caller-supplied databaseName and roleName (official endpoint requirement); URI password redacted unless reveal: true. raw.connectionUri and raw.revealRolePassword honor reveal and register revealed secrets for later error redaction. raw.recoverProject restores a deleted project. regions() forwards a supplied organizationId as org_id (optional; recommended by Neon for accurate availability). wait() on a bare project or database ref is refused with CAPABILITY (no status field); pass the write result or operation.",
       "evidence": "docs (official Neon API v2); behavior covered by recorded-HTTP tests"
     },
     {
@@ -290,7 +378,31 @@
         "statusPolling": [
           "project",
           "branch"
-        ]
+        ],
+        "connection": [
+          "project",
+          "branch"
+        ],
+        "resetCredential": [
+          "project"
+        ],
+        "actions": {
+          "pause": [
+            "project"
+          ],
+          "restart": [
+            "project"
+          ],
+          "resume": [
+            "project"
+          ],
+          "reset": [
+            "branch"
+          ],
+          "restore": [
+            "branch"
+          ]
+        }
       },
       "prerequisites": {
         "create:project": [
@@ -299,8 +411,56 @@
           "db_pass (required by the API; generated when password is omitted)"
         ]
       },
-      "notes": "A Supabase project is the PostgreSQL database; creating kind 'database' is refused with CAPABILITY. The API never echoes db_pass; when password is omitted the adapter generates one and returns it once via secrets. Current-API facts: a spec plan is refused with CONFIGURATION (plans are chosen at the organization level), a spec region maps to the official region_selection form, and organization_id is deprecated-but-accepted alongside providerOptions.organization_slug. wait() polls resource status because there is no operations endpoint. Connection bridge: raw.databaseHost and raw.branchConfig surface official host/credential pieces; the SDK never fabricates a URL from the token.",
-      "evidence": "docs (official Supabase Management API v1 spec); behavior covered by recorded-HTTP tests"
+      "notes": "A Supabase project is the PostgreSQL database; creating kind 'database' is refused with CAPABILITY. The API never echoes db_pass; when password is omitted the adapter generates one and returns it once via secrets. resetCredential rotates the project password (official PATCH, generated when omitted). action(project,'resume') is the un-pause primitive: official POST /v1/projects/{ref}/restore (the dashboard's Resume project button, projects:write scope); the endpoint echoes no resource or operation, so wait() on the action result is refused by design — poll get() instead. action(branch,'restore') cancels a scheduled branch deletion (not point-in-time data restore; backups/PITR is an unimplemented gap). No recover-deleted-project endpoint exists. Current-API facts: a spec plan is refused with CONFIGURATION (plans are chosen at the organization level), a spec region maps to the official region_selection form, and organization_id is deprecated-but-accepted alongside providerOptions.organization_slug. wait() polls resource status because there is no operations endpoint. Connection bridge: connection() exposes the official host for a direct project connection (the payload carries no database/role fields) and pooler details via the official pooler config endpoint; the SDK never fabricates a URL from the token.",
+      "evidence": "docs (official Supabase Management API v1 spec, plus official dashboard source for resume semantics); behavior covered by recorded-HTTP tests"
+    },
+    {
+      "id": "planetscale",
+      "factory": "planetscaleManagement",
+      "import": "dbsdk/management/planetscale",
+      "credential": "PlanetScale service token (tokenId + tokenSecret; Authorization: <id>:<secret>, no Bearer scheme)",
+      "kinds": [
+        "project",
+        "branch",
+        "role"
+      ],
+      "capabilities": {
+        "update": [
+          "project",
+          "role"
+        ],
+        "delete": [
+          "project",
+          "branch",
+          "role"
+        ],
+        "pagination": "page-based on all implemented list endpoints (page/per_page); a limit above the official maximum of 100 is refused before dispatch",
+        "asyncOperations": false,
+        "statusPolling": [
+          "project",
+          "branch",
+          "role"
+        ],
+        "connection": [
+          "project",
+          "branch",
+          "role"
+        ],
+        "resetCredential": [
+          "role"
+        ],
+        "actions": {},
+        "listScope": "branch lists require projectId (the database name slug); role lists require projectId and branchId scope"
+      },
+      "prerequisites": {
+        "create:project": [
+          "name",
+          "providerOptions.cluster_size (official requirement)",
+          "organization (factory option; spec.organizationId must match)"
+        ]
+      },
+      "notes": "PlanetScale's database (the managed, billable unit) maps to kind 'project'; branches map to 'branch' with projectId = the database NAME SLUG; Postgres role credentials are the provider-defined 'role' kind, scoped {projectId, branchId} and addressed by uid (name is a separate field; databases/branches are name-addressed). All CRUD is organization-scoped: the factory organization is the required owner, including create('project'); a mismatching spec.organizationId is refused with zero dispatch. Discovery (organizations(), regions(), raw.clusterSizeSkus()) may target other orgs explicitly. Engine gate: every mutating verb first GETs the parent database (official kind field, never cached) and refuses non-PostgreSQL parents BEFORE the mutation; a missing kind fails honestly (PROVIDER), and list('project') filters mixed-engine pages. create('project') takes no plan field and no create-time password — credentials come from roles. raw.clusterSizeSkus always sends engine=postgresql (official default is mysql) and returns the official array UNFILTERED (enabled:false included). Role passwords are ONE-TIME secrets (create/reset): they surface only in secrets, are redacted from raw, and are registered for later error redaction; connection() never fabricates a password and its URI is always redacted. resetCredential(role) rotates server-generated (caller passwords refused, zero requests); raw.renewRole extends a role's expiration without a new password. No operations API: wait() polls the resource's own readiness (role readiness precedence: dropped/deleted -> deleting, expired/disabled -> paused, then ready). Refused rather than guessed (official endpoints exist, unverified this round): branch update (PATCH), backups/restore, deploy requests, IP restrictions, bouncers, and all lifecycle actions (declared actions: none). Vitess/MySQL and Neki are separate systems, not modeled.",
+      "evidence": "docs (official PlanetScale API per-endpoint references); behavior covered by injected-HTTP tests and real local-PG driver legs; no hosted PlanetScale endpoint exercised"
     }
   ],
   "capabilitiesLegend": [

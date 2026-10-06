@@ -27,7 +27,12 @@ import {
   type PgPoolLike,
   type PgSslOptions,
 } from './pg-engine.js';
-import { CapabilityError, ConfigurationError } from './errors.js';
+import { ConfigurationError } from './errors.js';
+import {
+  assertNoUrlSslOverride,
+  collectUrlSslDirectives,
+} from './pg-url-ssl.js';
+import { createTransactionPoolerGuard } from './pg-sql.js';
 import type { DatabaseAdapter, DatabaseAdapterCapabilities } from '../types.js';
 
 export type SupabaseConnectionMode = 'direct' | 'session' | 'transaction';
@@ -89,28 +94,16 @@ const MODE_PORTS: Record<SupabaseConnectionMode, number> = {
   transaction: 6543,
 };
 
-// Session-level state that cannot work through a transaction-mode pooler.
-// Docs: https://supabase.com/docs/guides/database/connecting-to-postgres#transaction-mode-limitations
-const SESSION_STATE_PATTERNS: RegExp[] = [
-  /^\s*SET\s+(?!LOCAL\b)/i, // plain session `SET`; `SET LOCAL` inside a transaction is fine
-  /^\s*RESET\b/i,
-  /^\s*(LISTEN|UNLISTEN|NOTIFY)\b/i,
-  /^\s*PREPARE\b/i,
-  /^\s*DEALLOCATE\b/i,
-  /^\s*CREATE\s+(?:GLOBAL\s+|LOCAL\s+)?TEMP/i,
-  /^\s*DECLARE\b[\s\S]*\bWITH\s+HOLD\b/i,
-];
-
+// Session-state guarding on the transaction-pooler path is shared with the PlanetScale
+// PgBouncer adapter: `createTransactionPoolerGuard` (src/adapters/pg-sql.ts) refuses the
+// session-state statement classes AND multi-statement strings before dispatch, immune to
+// leading comments, string literals and dollar-quoted bodies.
+//
+// Public compatibility: `assertNoSessionState` remains exported (re-exported from
+// src/adapters/index.ts). It now delegates to the shared guard, which means it also
+// rejects multi-statement strings — the pre-dispatch guarantee it exists for.
 export function assertNoSessionState(text: string): void {
-  for (const pattern of SESSION_STATE_PATTERNS) {
-    if (pattern.test(text)) {
-      throw new CapabilityError(
-        'supabase',
-        'sessionState',
-        `supabase (transaction mode): session-level state is not supported by the transaction pooler and this statement was rejected before dispatch: ${text.trimStart().slice(0, 80)}`,
-      );
-    }
-  }
+  createTransactionPoolerGuard({ adapterId: 'supabase', label: 'supabase (transaction mode)' })(text);
 }
 
 function parseConnectionString(connectionString: string, adapter: string) {
@@ -179,7 +172,9 @@ export function supabase(options: SupabaseAdapterOptions): DatabaseAdapter<Supab
 
   const enforceSessionRestrictions = options.enforceSessionRestrictions ?? true;
   const guard =
-    mode === 'transaction' && enforceSessionRestrictions ? assertNoSessionState : undefined;
+    mode === 'transaction' && enforceSessionRestrictions
+      ? createTransactionPoolerGuard({ adapterId: id, label: 'supabase (transaction mode)' })
+      : undefined;
 
   const isLocal =
     parsed.host === 'localhost' ||
@@ -195,6 +190,18 @@ export function supabase(options: SupabaseAdapterOptions): DatabaseAdapter<Supab
           // out explicitly — TLS that silently skips verification would not stop
           // a man-in-the-middle attack.
           { rejectUnauthorized: true };
+
+  // Review finding F3 (narrow form for this adapter's pass-through TLS policy): when the
+  // connection URL carries SSL directives AND an explicit ssl configuration exists, pg
+  // would silently REPLACE the configured ssl object with whatever the URL says. Refuse
+  // that ambiguity before pool construction; URL directives alone keep native pg parsing
+  // (including the documented safe `sslmode=verify-full`).
+  assertNoUrlSslOverride({
+    adapter: id,
+    directives: collectUrlSslDirectives(parsed.url),
+    explicitSsl: options.ssl,
+    poolSsl: options.pool?.ssl,
+  });
 
   const poolConfig: PgPoolConfig = {
     connectionString: options.connectionString,

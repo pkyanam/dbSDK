@@ -7,14 +7,16 @@
 **Create, manage, and query databases with one SDK.**
 
 Bring a provider credential, provision and manage resources, and run
-queries through one typed client. Launch providers: Supabase and Neon.
+queries through one typed client. Launch providers: Supabase, Neon, and
+PlanetScale Postgres.
 
 </div>
 
 dbSDK has two halves that share one design language.
 
 **Management (the control plane).** Bring your own provider credential (a
-Supabase personal access token or a Neon API key) and get one stable verb
+Supabase personal access token, a Neon API key, or a PlanetScale service
+token) and get one stable verb
 set over provider resources: `create`, `list`, `get`, `update`, `delete`,
 and `wait`. Provision a project, wait until it is ready, retrieve the
 connection details, and hand them to the query client. There is no central
@@ -25,6 +27,28 @@ create or delete.
 already have, or the one you just provisioned, and write PostgreSQL.
 dbSDK normalizes everything around the query: parameter binding, the
 result envelope, errors, transactions, and capability checks.
+
+**Sync (`dbsdk/sync`).** One-way, resumable transfer between two
+databases from different providers: a keyset-paginated source, an
+idempotent upsert target, and a caller-owned checkpoint store. Initial
+copy and incremental rerun are the same primitive. Failures stop with the
+original error and the last committed cursor; nothing retries silently.
+Explicit identities and verified unique ordering are required, the copied
+payload is value-faithful (exact timestamps, JSON arrays and JSON null
+survive verbatim, and numeric/decimal arrays are delivered as exact text),
+the source's cached schema snapshot is re-validated against the catalog on
+every read (schema drift after the first read fails loudly before anything
+is written), and the docs are equally explicit about what it is
+not: no delete propagation, no CDC, no bidirectional sync.
+
+**Drizzle interop (`dbsdk/drizzle`).** An optional bridge hands Drizzle
+ORM's stable node-postgres / neon-http drivers a validated, dbSDK-owned
+connection: typed schema queries, joins, and relational queries run on the
+same pool dbSDK manages, with lifetime ownership, verified TLS, and the
+pooler guards preserved. Drizzle is never forked or wrapped; schemas come
+from `drizzle-orm` directly. Native Drizzle errors surface as-is (no
+unified-error claim), and Studio, Kit, seed, and migrations are separate
+upstream tools — not claimed here.
 
 - **Parameterized by construction.** Interpolated values become positional
   bind parameters. They can never become identifiers or raw SQL fragments.
@@ -44,12 +68,12 @@ result envelope, errors, transactions, and capability checks.
 
 Version 0.1, source-only. **There is no npm package yet**, so nothing here
 will ask you to `npm install dbsdk`. You install from this repository
-(instructions below). The current verification is local and offline: 355
-automated tests pass with no hosted calls (342 pass fully offline; the 16
-environment-dependent live checks skip without credentials). The local
-live checks that do run use a real Postgres 17 container, the Neon HTTP
-protocol through a local proxy, and the Supabase adapter against a local
-server. No hosted Supabase or Neon project has been touched by this
+(instructions below). The current verification is local and offline: the
+automated suite passes with no hosted calls; live checks that need
+credentials skip automatically, and the ones that can run use a real
+postgres 17 container locally, the Neon HTTP protocol through a local
+proxy, and the Supabase and PlanetScale adapters against a local server. No
+hosted Supabase, Neon, or PlanetScale endpoint has been touched by this
 project, and the docs never claim otherwise.
 
 ## Install from source
@@ -75,10 +99,11 @@ cd packages/dbsdk && npm pack      # produces dbsdk-0.1.0.tgz
 npm install ./dbsdk-0.1.0.tgz      # from your app
 ```
 
-The two database drivers are optional peers, installed only where you use
-them: `pg` for the PostgreSQL and Supabase adapters,
-`@neondatabase/serverless` for the Neon adapter. The management subpaths
-need no driver.
+The three database drivers and Drizzle are optional peers, installed only
+where you use them: `pg` for the PostgreSQL, Supabase, and PlanetScale
+adapters, `@neondatabase/serverless` for the Neon adapter, and
+`drizzle-orm` for the Drizzle bridge. The management subpaths need no
+driver.
 
 ## Quickstart: provision, wait, connect, query
 
@@ -195,6 +220,20 @@ const db = createDatabase({
 });
 ```
 
+And on PlanetScale Postgres (verified TLS by default; `connectionMode` must
+match the port — direct 5432, PgBouncer pooled 6432):
+
+```ts
+import { planetscale } from "dbsdk/planetscale";
+
+const db = createDatabase({
+  adapter: planetscale({
+    connectionString: process.env.PLANETSCALE_DB_URL!, // from a role's connection info
+    connectionMode: "direct",
+  }),
+});
+```
+
 Dynamic identifiers are explicit and validated; user input never becomes SQL
 text:
 
@@ -212,6 +251,8 @@ await db.query(sql`select * from ${sql.identifier(tableName)} limit 10`);
 | supabase direct | tcp | yes | yes | yes | on a leased session |
 | supabase session | tcp | yes | yes | yes | on a leased session |
 | supabase transaction | tcp | yes | yes | yes | guarded before dispatch |
+| planetscale direct | tcp | yes | yes | yes | on a leased session |
+| planetscale pooled | tcp | yes | yes | yes | guarded before dispatch |
 | neon http | http | yes | refused before dispatch | yes, one round trip | no |
 | neon websocket | websocket | yes | yes | yes | no on pooled hosts |
 | neon http + websocket transactions | http + websocket | yes | yes | yes | no on pooled hosts |
@@ -242,6 +283,10 @@ evidence levels: [capabilities docs](https://dbsdk.com/docs/capabilities).
 
 - Getting started: https://dbsdk.com/docs/getting-started
 - Management (provisioning and lifecycle): https://dbsdk.com/docs/management
+- Provider adapters: postgres, Supabase, Neon, and
+  [PlanetScale Postgres](https://dbsdk.com/docs/adapters/planetscale)
+- Drizzle ORM interop: https://dbsdk.com/docs/drizzle
+- Sync (resumable provider-to-provider transfer): https://dbsdk.com/docs/sync
 - Credentials guide: https://dbsdk.com/docs/credentials
 - Capabilities: https://dbsdk.com/docs/capabilities
 - Also mirrored at https://database-sdk.dev
@@ -249,14 +294,15 @@ evidence levels: [capabilities docs](https://dbsdk.com/docs/capabilities).
   plus `llms.txt`, `llms-full.txt`, and an MCP endpoint on the live site.
 - A coding-agent skill lives at [`skills/dbsdk/SKILL.md`](skills/dbsdk/SKILL.md).
 - Runnable examples live in [`examples/`](examples/), including management
-  flows that need no provider account (the fixture adapters).
+  flows that need no provider account (the fixture adapters), an
+  offline-capable resumable transfer, and a Drizzle interop example.
 
 ## Repository layout
 
 ```
 packages/dbsdk/     the package: core clients, SQL builder, errors, query and management adapters, tests
 apps/web/           the documentation site (dbsdk.com), with brand assets in apps/web/public/brand
-examples/           runnable TypeScript examples (query and management)
+examples/           runnable TypeScript examples (query, management, sync)
 skills/             coding-agent skill
 research/           pre-implementation research notes
 ```
@@ -273,4 +319,7 @@ project on [GitHub Sponsors](https://github.com/sponsors/pkyanam).
 
 ## License
 
-[MIT](LICENSE).
+dbSDK is [Apache-2.0](LICENSE) (attribution notices in [NOTICE](NOTICE);
+third-party component notices in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)).
+Historical releases published before the Apache-2.0 adoption remain available
+under the MIT license of their own versions.

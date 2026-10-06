@@ -16,17 +16,23 @@ import { createManagement } from './core.js';
 import { ManagementError } from './errors.js';
 import type {
   CreateResourceSpec,
+  ManagementActionOptions,
   ManagementAdapter,
   ManagementAdapterCapabilities,
   ManagementCallOptions,
   ManagementClient,
+  ManagementConnectionInfo,
+  ManagementConnectionInput,
   ManagementListQuery,
   ManagementOperation,
+  ManagementOrganization,
   ManagementPage,
   ManagementProviderId,
+  ManagementRegion,
   ManagementResource,
   ManagementResourceKind,
   ManagementWriteResult,
+  ResetCredentialOptions,
   ResourceRef,
   UpdateResourceSpec,
 } from './types.js';
@@ -37,7 +43,13 @@ export type RecordedManagementCall =
   | { verb: 'get'; ref: ResourceRef }
   | { verb: 'update'; spec: UpdateResourceSpec }
   | { verb: 'delete'; ref: ResourceRef }
-  | { verb: 'getOperation'; operation: ManagementOperation };
+  | { verb: 'getOperation'; operation: ManagementOperation }
+  // A4 verbs (recorded when exercised)
+  | { verb: 'organizations' }
+  | { verb: 'regions'; input: { organizationId?: string } }
+  | { verb: 'connection'; ref: ResourceRef; input: ManagementConnectionInput }
+  | { verb: 'action'; ref: ResourceRef; action: string; input: Record<string, unknown> | undefined }
+  | { verb: 'resetCredential'; ref: ResourceRef; password: string | undefined };
 
 export type ManagementFixtureHandlers = {
   create?: (spec: CreateResourceSpec, options?: ManagementCallOptions) => Promise<ManagementWriteResult>;
@@ -53,6 +65,26 @@ export type ManagementFixtureHandlers = {
     operation: ManagementOperation,
     options?: ManagementCallOptions,
   ) => Promise<ManagementOperation>;
+  // A4 handlers (optional; unscripted A4 verbs fail loudly like the others)
+  organizations?: (options?: ManagementCallOptions) => Promise<readonly ManagementOrganization[]>;
+  regions?: (
+    input: { organizationId?: string },
+    options?: ManagementCallOptions,
+  ) => Promise<readonly ManagementRegion[]>;
+  connection?: (
+    ref: ResourceRef,
+    input: ManagementConnectionInput,
+    options?: ManagementCallOptions,
+  ) => Promise<ManagementConnectionInfo>;
+  action?: (
+    ref: ResourceRef,
+    action: string,
+    options?: ManagementActionOptions,
+  ) => Promise<ManagementWriteResult>;
+  resetCredential?: (
+    ref: ResourceRef,
+    options?: ResetCredentialOptions,
+  ) => Promise<ManagementWriteResult>;
 };
 
 // Re-exported alias so tests can name the delete handler result without importing two types.
@@ -159,6 +191,42 @@ export function createManagementFixture(options: ManagementFixtureOptions = {}):
         throw unscriptedError('getOperation', operation.id);
       }
       return handlers.getOperation(operation, callOptions);
+    },
+    // A4 verbs: same recorded/handler pattern. Unscripted ones fail loudly like the others.
+    async organizations(callOptions) {
+      record({ verb: 'organizations' });
+      if (!handlers.organizations) {
+        throw unscriptedError('organizations', 'no handler');
+      }
+      return handlers.organizations(callOptions);
+    },
+    async regions(input, callOptions) {
+      record({ verb: 'regions', input });
+      if (!handlers.regions) {
+        throw unscriptedError('regions', 'no handler');
+      }
+      return handlers.regions(input, callOptions);
+    },
+    async connection(ref, input, callOptions) {
+      record({ verb: 'connection', ref, input });
+      if (!handlers.connection) {
+        throw unscriptedError('connection', JSON.stringify(ref));
+      }
+      return handlers.connection(ref, input, callOptions);
+    },
+    async action(ref, action, callOptions) {
+      record({ verb: 'action', ref, action, input: callOptions?.input });
+      if (!handlers.action) {
+        throw unscriptedError('action', `${action} ${JSON.stringify(ref)}`);
+      }
+      return handlers.action(ref, action, callOptions);
+    },
+    async resetCredential(ref, callOptions) {
+      record({ verb: 'resetCredential', ref, password: callOptions?.password });
+      if (!handlers.resetCredential) {
+        throw unscriptedError('resetCredential', JSON.stringify(ref));
+      }
+      return handlers.resetCredential(ref, callOptions);
     },
     raw: { get calls() { return calls; } },
   };

@@ -1,0 +1,320 @@
+---
+title: Sync
+description: One-way resumable transfer between databases through dbsdk/sync - keyset sources, upsert targets, caller-owned checkpoints, and the guarantees it does and does not make.
+sidebar:
+  order: 14
+---
+
+`dbsdk/sync` moves data one way between two databases with resumable
+progress. It works with any two clients the SDK can build: a Supabase
+project to a Neon branch, Neon to local Postgres, Supabase to Supabase.
+The workflow (ordering, checkpoints, failure reporting, idempotent replay)
+is one vocabulary; the databases stay what they are.
+
+Sync is a data-plane module. It does not provision anything, does not
+discover databases, and never touches credentials you did not already have.
+Provisioning stays in [Management](/docs/management).
+
+## The shape
+
+```ts
+import { createDatabase } from "dbsdk";
+import { supabase } from "dbsdk/supabase";
+import { neon } from "dbsdk/neon";
+import { createSqlSource, createSqlTarget, runTransfer } from "dbsdk/sync";
+
+const sourceDb = createDatabase({
+  adapter: supabase({ connectionString: process.env.SUPABASE_DB_URL!, connectionMode: "session" }),
+});
+const targetDb = createDatabase({
+  adapter: neon({ connectionString: process.env.NEON_DB_URL!, transport: "http" }),
+});
+
+const result = await runTransfer(
+  createSqlSource({
+    db: sourceDb,
+    table: ["public", "events"],
+    orderBy: ["updated_at", "id"],
+    identity: "supabase:proj-ref.public.events",
+  }),
+  createSqlTarget({
+    db: targetDb,
+    table: ["public", "events"],
+    key: ["id"],
+    identity: "neon:branch-42.public.events",
+  }),
+  { batchSize: 500, checkpointStore: myStore },
+);
+
+if (result.status === "failed") throw result.error;
+```
+
+`runTransfer` reads pages from the source, writes them to the target, and
+advances a cursor only after a write resolves. Both clients are yours; the
+SDK never connects to anything you did not pass in.
+
+## `identity` is required
+
+Every source and target needs an explicit, stable, secret-free identity
+string. It names the checkpoint, so it must be **stable across runs for the
+same database pair** and **distinct across different pairs**. Two Neon
+branches, or two Supabase projects, copying the same table name need
+different identities or the second job resumes from the first job's cursor
+and copies nothing.
+
+dbSDK never derives the identity for you. No adapter id, no table name, no
+connection string parsing, no hashing of credentials. Pick labels like
+`supabase:proj-ref.public.events` and keep them stable. The default
+checkpoint key is `dbsdk.sync:v1:` followed by a JSON array of the two
+identities, e.g. `dbsdk.sync:v1:["supabase:proj.public.events","neon:br.public.events"]`.
+That encoding is injective: identities containing `->`, quotes, or any other
+characters cannot make two different endpoint pairs share one key. Pass
+`checkpointKey` to control the key verbatim instead.
+
+## Ordering: the cursor must be a unique total order
+
+Keyset pagination moves past the last row with a strict `>` comparison.
+That is only row-complete when the `orderBy` columns form a unique,
+NOT NULL total order, such as `(updated_at, id)` with a unique index
+covering a subset of them, or a primary key alone. Otherwise rows that
+share a cursor value at a page boundary are skipped, silently.
+
+By default the source checks this for you. On its first read it runs
+read-only `pg_catalog` queries (once per source instance) verifying:
+
+- the table has a valid unique index (a primary key counts) whose key
+  columns are a subset of the `orderBy` columns, and
+- every `orderBy` column is declared `NOT NULL` and actually exists.
+
+No match: the read fails with a `SyncError` code `CONTRACT` before any row
+is read or any write is dispatched. Set `uniqueOrder: "assume"` to skip the
+unique-index check for orderings that are unique in practice but carry no
+declared index. Even then, duplicate cursor values inside one page fail the
+run. The check cannot catch every case (`batchSize: 1` with ties across page
+boundaries stays silent under `assume`), which is why `verify` is the
+default. Creating the index is better than opting out.
+
+`assume` skips only the unique-index verification — the column-metadata
+inspection runs in both modes (see the next section), so a catalog that
+cannot be read fails the run honestly with zero writes either way.
+
+## The copied payload is value-faithful
+
+Cursors were already exact: the source projects every `orderBy` column
+additionally as `col::text` under an internal `__dbsdk_cursor_N` alias, so
+cursor values are PostgreSQL's exact text rendering, including microsecond
+timestamps. A millisecond-rounded cursor used to stall the transfer
+permanently on sub-millisecond `timestamptz` data; that class of failure is
+gone.
+
+A second catalog query (the same one per source instance) resolves every
+projected column's type — through domains to the base type, and through
+array element types. Columns whose native driver transport is lossy or
+ambiguous are delivered as PostgreSQL's exact `col::text` rendering instead:
+
+- date/time columns (`timestamp`, `timestamptz`, `date`, time types) and
+  `interval` — the driver's `Date` conversion truncates microseconds;
+- `json` and `jsonb` — a parsed document loses the distinction between a
+  JSON `null` and SQL `NULL`, and a top-level array like `[]` would be
+  re-encoded as a PostgreSQL array literal (`[]` silently became `{}` in
+  jsonb columns before this projection existed);
+- arrays whose **elements** are any of the above (e.g. `timestamptz[]`,
+  `jsonb[]`);
+- **numeric-family arrays** — `numeric[]`, `decimal[]` (an alias of the same
+  type), domains over `numeric`, and multidimensional numeric arrays. The
+  driver parses numeric *array elements* as binary doubles and silently
+  rounds values beyond double precision (`9007199254740993` became
+  `9007199254740992`, a 30-digit decimal lost 13 digits) — while a scalar
+  `numeric` is delivered as an exact string. These columns are therefore
+  projected as their exact text too; the digits survive verbatim;
+- anything the catalog cannot resolve (the exact text rendering is the only
+  transport guaranteed lossless).
+
+Everything else — numbers, text, booleans, `bytea`, `text[]`/`int8[]`-style
+arrays — keeps its native JavaScript value. Strings are written back into
+typed columns verbatim by PostgreSQL, so the default SQL→SQL copy
+round-trips exactly: microseconds survive, `[]` stays an array, JSON `null`
+stays JSON null, and every `numeric[]` digit survives. Convert in `map`
+(for example `JSON.parse(doc)` or `new Date(ts)`) when you need typed values
+in transform logic — but note that a `Date` built by your own code carries
+only the precision it carries; the source-delivered string is the exact
+value.
+
+One remaining honest caveat about cursors: they are opaque strings. Their
+values must advance monotonically for the same table; that is the source's
+responsibility and the engine cannot verify it beyond the stall guard.
+`maxBatches` is the only bound on a misbehaving source.
+
+Reserved internal names: the source projects cursor values under
+`__dbsdk_cursor_N` aliases. A **real** table column using that prefix is
+refused with `CONTRACT` before anything is read (a wildcard projection
+cannot be checked at construction time). Passing an explicit `columns` list
+that omits such a column is allowed and safe — it is simply not copied.
+
+## The source snapshot is re-validated on every read
+
+Reads never use `SELECT *`. The first read caches the table's column
+metadata (the **schema snapshot**) and projects an explicit, table-qualified
+column list from it; every later read re-queries the catalog and compares
+the live table against that snapshot **before** the data query is
+dispatched. A column added, removed, or retyped after the snapshot fails
+the read with `CONTRACT` — nothing is read, written, or checkpointed, and
+the error says exactly what changed and what to do.
+
+That guard closes the whole "cached metadata went stale" class: a column
+added after the first read can no longer silently appear in the payload,
+silently collide with an internal cursor alias (a real column named exactly
+`__dbsdk_cursor_0` used to be dropped this way), or silently lose precision
+(a new microsecond-timestamp column would have been transported through the
+native `Date` parser). To continue against the new schema, **recreate the
+source** — a new `createSqlSource` with the same identity. The existing
+checkpoint key remains valid, so a resumed run picks up where it left off.
+
+Two honest costs: the re-validation is one extra read-only `pg_catalog`
+query per page after the first (catalog read access is already required by
+the preflight), and a schema migration therefore requires recreating the
+source instance rather than being invisible. An explicit `columns` list may
+ignore UNSELECTED added/removed columns (that is the documented contract of
+a fixed projection) — but selected columns' existence and types are still
+guarded, and a selected column that was dropped or retyped fails with
+`CONTRACT` just like the wildcard case.
+
+## Target writes are type-aware for array values
+
+The target resolves its columns' types (cached, and only when a batch
+actually contains a top-level JavaScript array value — the one ambiguous
+shape). A JS array is then encoded by column type:
+
+- PostgreSQL array columns (`text[]`, `int8[]`, ...): passed through
+  natively, which the driver encodes correctly;
+- `json`/`jsonb` columns: encoded as JSON text;
+- anything else or unresolvable: refused with `CONTRACT` **before any
+  write** — guessing risks silent corruption (this is exactly how `[]`
+  became `{}` in jsonb columns before the fix).
+
+`json[]`/`jsonb[]` element arrays are also refused for JS array values (the
+driver cannot encode object/array elements as array-literal text safely);
+the default source path avoids this by delivering such columns as exact
+text, which PostgreSQL parses natively.
+
+## Checkpoints are caller-owned
+
+```ts
+type CheckpointStore = {
+  get(key: string): Promise<string | null>;
+  set(key: string, value: string): Promise<void>;
+};
+```
+
+The default store is in-memory: progress is lost on restart. That is
+always safe to re-copy (the target is an upsert), but it is not durable
+progress. For scheduled incremental sync, back the interface with a file,
+a table, or Redis. The example in `examples/09-resumable-transfer.ts`
+implements a small file-backed store.
+
+Rules to respect:
+
+- **One writer per checkpoint key.** There is no locking or compare-and-set.
+  Two concurrent jobs sharing a key interleave writes, last one wins.
+  Overlap is safe-but-wasteful for upsert targets; a transform or a
+  non-idempotent target can make replay observably different.
+- A failed run leaves the checkpoint at the last committed cursor.
+- A run that stops because of `maxBatches` returns `status: "completed"`
+  with `exhausted: false`. That is a bounded pause, not source exhaustion;
+  check `exhausted`, not `status`, to know the copy is finished.
+
+## Failures stop, they do not retry
+
+Any mid-run failure (read error, write error, checkpoint persistence
+error, a map function that throws, a target receipt that fails validation)
+ends the run as `status: "failed"` with the **original error** in
+`result.error`. Nothing is retried automatically. `lastCursor` is always
+the truthful resume point.
+
+Two boundary cases, stated plainly:
+
+- **A write whose outcome is unknown** (connection drop after the statement
+  was sent) is preserved as the original error. The batch may or may not
+  have committed; the checkpoint does not advance past it.
+- **A crash after commit but before the checkpoint** means the target may
+  already hold the batch. Rerunning re-reads and re-applies it. That is
+  safe only because the default target is an upsert: the same keys
+  overwrite with the same values. Row state converges; repeated side
+  effects (triggers, webhooks) do not. This is idempotent data, not
+  exactly-once delivery.
+
+A target whose `writeMode` is not `"upsert"` is refused before dispatch
+unless you pass `acknowledgeNonIdempotentTarget: true`.
+
+## What sync does not do
+
+- **No deletes.** Rows removed at the source stay on the target.
+- **No CDC.** An `updated_at` high-water cursor is finite polling. Rows
+  that become visible after a run has read past their position, through
+  late commits, backfills, or clock-skewed writers, are missed by later
+  incremental runs. Repair is a manual full re-copy (`startFrom:
+  "beginning"` into the upsert target) or CDC, which is a different
+  mechanism dbSDK does not implement.
+- **No bidirectional sync, no conflict resolution, no two-way merge.**
+- **No atomic cross-provider transaction.** Upsert statements are atomic
+  per statement; a large batch split into chunks may land partially before
+  a crash, and converges on replay for the same idempotence reason.
+- **No schema translation.** Caller ensures the target schema is
+  compatible and has a real unique index on the key columns; the upsert
+  fails loudly otherwise.
+- **No hosted sync service, no scheduling.** Reruns on a schedule are your
+  cron or queue.
+
+## Provisioning and sync, end to end
+
+Management provisions the target; sync populates it. The credentials are
+different secrets on every provider: a management PAT or API key never
+connects to a database. See [Credentials](/docs/credentials) for the split.
+
+```ts
+import { createDatabase } from "dbsdk";
+import { createManagement } from "dbsdk/management";
+import { postgres } from "dbsdk/postgres";
+import { neonManagement } from "dbsdk/management/neon";
+import { createSqlSource, createSqlTarget, runTransfer } from "dbsdk/sync";
+
+const management = createManagement({ adapter: neonManagement({ apiKey: process.env.NEON_API_KEY! }) });
+const created = await management.create({ kind: "project", name: "reporting-copy" });
+const project = await management.wait(created, { timeoutMs: 120_000 });
+const connectionString = created.secrets.find((s) => s.label === "connectionString")!.value;
+
+const targetDb = createDatabase({ adapter: postgres({ connectionString }) });
+// create the target table with a unique index on the key columns first;
+// the upsert needs it and PostgreSQL refuses the write without one.
+
+const result = await runTransfer(
+  createSqlSource({
+    db: sourceDb, // your existing database, any provider
+    table: ["public", "events"],
+    orderBy: ["updated_at", "id"],
+    identity: "supabase:proj-ref.public.events",
+  }),
+  createSqlTarget({
+    db: targetDb,
+    table: ["public", "events"],
+    key: ["id"],
+    identity: `neon:${project.id}.public.events`,
+  }),
+  { batchSize: 500, checkpointStore: myStore },
+);
+```
+
+Provider credentials are one-time in `secrets` on both Supabase and Neon;
+do not assume they are re-readable. On Neon, role passwords can be
+re-revealed through the management adapter's raw reveal endpoint; on
+Supabase, the create-time password cannot be recovered, only reset.
+
+## Evidence and status
+
+The transfer engine, SQL adapters, and failure shapes are covered by
+automated tests, including runs against a real local PostgreSQL 17
+instance: initial copy, incremental rerun, crash-and-resume convergence,
+cancellation, and the catalog preflight. The runnable example
+(`examples/09-resumable-transfer.ts`) runs fully offline and, with a local
+Postgres, end to end. No hosted Supabase or Neon endpoint has been used by
+this project's verification, and the docs do not claim otherwise.
