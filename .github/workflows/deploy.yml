@@ -41,7 +41,10 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 22.12
+          # 22.18 matches the proven CI core version (ci.yml) and the local
+          # validation environment; pnpm 11.22 (repo packageManager) needs
+          # >=22.13, so keep the floor safely above it.
+          node-version: 22.18
           cache: npm
           cache-dependency-path: apps/web/package-lock.json
 

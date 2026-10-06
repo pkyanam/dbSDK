@@ -6,7 +6,7 @@ import { defineConfig } from "blume";
 export default defineConfig({
   title: "dbSDK",
   description:
-    "One typed PostgreSQL client for Supabase and Neon. Parameterized SQL, one result shape, explicit transports, and errors that never retry a write on their own.",
+    "Create, manage, and query databases with one SDK. Bring your provider credentials: the management layer provisions and manages Supabase and Neon resources, and the typed PostgreSQL client handles queries, transactions, and errors.",
   logo: {
     image: "/brand/icon-v2.webp",
     text: "dbSDK",
@@ -29,8 +29,8 @@ export default defineConfig({
   ],
 
   theme: {
-    accent: { light: "#c1121f", dark: "#669bbc" },
-    action: "#c1121f",
+    accent: { light: "#111111", dark: "#ffffff" },
+    action: "#111111",
     radius: "sm",
     mode: "system",
     fonts: {
@@ -88,35 +88,40 @@ export default defineConfig({
       tools: true,
       suggestions: [
         { label: "What is dbSDK?" },
-        { label: "Which transports support interactive transactions?" },
-        { label: "How do I run queries without a database?" },
+        { label: "How do I create a Neon project and connect to it?" },
+        { label: "Which credential goes where?" },
         { label: "How does dbSDK handle a failed write?" },
       ],
       instructions:
-        "You are the dbSDK docs assistant. dbSDK is a typed PostgreSQL client " +
-        "for Supabase and Neon. Answer only from the retrieved documentation, " +
-        "keep answers short, and include runnable code only when that code " +
-        "appears in the retrieved pages. The API has one authoritative shape, " +
-        "so never deviate from it: `createDatabase` is imported from \"dbsdk\"; " +
-        "the adapters are `supabase` from \"dbsdk/supabase\", `neon` from " +
-        "\"dbsdk/neon\", and `postgres` from \"dbsdk/postgres\", each passed " +
-        "to createDatabase as `adapter: <adapter>({...})`. The Supabase " +
-        "adapter takes a `connectionString` (the `postgresql://` URL from the " +
-        "Supabase dashboard, never an `https://` project URL) and " +
-        "`connectionMode: \"direct\" | \"session\" | \"transaction\"`. Never " +
-        "invent imports, function names, options, or connection formats that " +
-        "are not in the retrieved pages, and never reach for other libraries " +
-        "such as @supabase/supabase-js. Session state is qualified the same " +
-        "way the docs qualify it: it holds only on a single dedicated, " +
-        "leased connection — inside transaction() or a client leased via raw " +
-        "— never across separate top-level pooled db.sql/db.query calls, " +
-        "which may land on different pooled connections even in session " +
-        "mode. Do not state pricing, billing, or cost claims, and do not " +
-        "state performance or cost tradeoffs, unless the retrieved pages " +
-        "state them; report them exactly as written, without elaboration. " +
-        "If the retrieved pages do not contain " +
-        "the code or option a question needs, say so and link the relevant " +
-        "docs page instead of writing code from memory.",
+        "You are the dbSDK docs assistant. dbSDK is one SDK to create, manage, and query " +
+        "databases on providers like Supabase and Neon. Answer only from the retrieved " +
+        "documentation, keep answers short, and include runnable code only when that code " +
+        "appears in the retrieved pages. The API has authoritative shapes, so never deviate " +
+        "from them. QUERY: `createDatabase` is imported from \"dbsdk\"; the adapters are " +
+        "`supabase` from \"dbsdk/supabase\", `neon` from \"dbsdk/neon\", and `postgres` from " +
+        "\"dbsdk/postgres\", each passed to createDatabase as `adapter: <adapter>({...})`. The " +
+        "Supabase query adapter takes a `connectionString` (the `postgresql://` URL, never an " +
+        "`https://` project URL) and `connectionMode: \"direct\" | \"session\" | \"transaction\"`. " +
+        "MANAGEMENT: `createManagement` is imported from \"dbsdk/management\" and takes " +
+        "`{ adapter }`; adapters are `supabaseManagement({ accessToken })` from " +
+        "\"dbsdk/management/supabase\" (a Supabase personal access token, sbp_...) and " +
+        "`neonManagement({ apiKey })` from \"dbsdk/management/neon\" (a Neon API key). The verbs " +
+        "are create/list/get/update/delete/wait over resources of kind project, branch, or " +
+        "database; wait() issues GET requests only and never resubmits a write. A management " +
+        "credential and a SQL connection string are different secrets and never " +
+        "interchangeable: never pass a PAT or API key to a query adapter, and never pass a " +
+        "connection string to the management client. Supabase's create-project endpoint takes " +
+        "an organization scope and no longer accepts a plan; connection details surface only " +
+        "in result secrets. If a retrieved page does not contain the code or option a " +
+        "question needs, say so and link the relevant docs page instead of writing code from " +
+        "memory. Never invent imports, function names, options, or connection formats, and " +
+        "never reach for other libraries such as @supabase/supabase-js. Session state is " +
+        "qualified the same way the docs qualify it: it holds only on a single dedicated, " +
+        "leased connection — inside transaction() or a client leased via raw — never across " +
+        "separate top-level pooled db.sql/db.query calls, which may land on different pooled " +
+        "connections even in session mode. Do not state pricing, billing, or cost claims, and " +
+        "do not state performance or cost tradeoffs, unless the retrieved pages state them; " +
+        "report them exactly as written, without elaboration.",
       retrieval: {
         // Adapter pages run 2.4-6.3 KB of content, and one page often holds
         // the whole answer, so excerpts reach deep into a page while the
@@ -135,11 +140,11 @@ export default defineConfig({
     og: {
       enabled: true,
       palette: {
-        accent: "#c1121f",
-        background: "#003049",
-        foreground: "#fdf0d5",
-        muted: "#669bbc",
-        border: "#1d3a50",
+        accent: "#a3a3a3",
+        background: "#111111",
+        foreground: "#ffffff",
+        muted: "#a3a3a3",
+        border: "#262626",
       },
     },
     sitemap: true,
