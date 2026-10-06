@@ -41,12 +41,15 @@ every read (schema drift after the first read fails loudly before anything
 is written), and the docs are equally explicit about what it is
 not: no delete propagation, no CDC, no bidirectional sync.
 
-**Drizzle interop (`dbsdk/drizzle`).** An optional bridge hands Drizzle
-ORM's stable node-postgres / neon-http drivers a validated, dbSDK-owned
-connection: typed schema queries, joins, and relational queries run on the
-same pool dbSDK manages, with lifetime ownership, verified TLS, and the
-pooler guards preserved. Drizzle is never forked or wrapped; schemas come
-from `drizzle-orm` directly. Native Drizzle errors surface as-is (no
+**Drizzle interop (`dbsdk/drizzle`) and schema authoring (`dbsdk/orm`).** An
+optional bridge hands Drizzle ORM's stable node-postgres / neon-http drivers
+a validated, dbSDK-owned connection: typed schema queries, joins, and
+relational queries run on the same pool dbSDK manages, with lifetime
+ownership, verified TLS, and the pooler guards preserved. `dbsdk/orm` is a
+pure re-export of the same stable drizzle-orm (0.45.x) root + pg-core
+authoring surface as a single import, so schemas authored through it are the
+same objects the bridge executes — PostgreSQL authoring only. Drizzle is
+never forked or wrapped; Native Drizzle errors surface as-is (no
 unified-error claim), and Studio, Kit, seed, and migrations are separate
 upstream tools — not claimed here.
 

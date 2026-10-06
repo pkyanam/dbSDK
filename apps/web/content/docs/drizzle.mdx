@@ -11,10 +11,16 @@ handle**, so you can use Drizzle's typed schema, query builder, and relational
 queries on the same pool dbSDK manages — without giving up the lifetime
 ownership, TLS posture, and guarded-pooler rules that dbSDK enforces.
 
+Its companion entry `dbsdk/orm` is the SDK-owned **schema authoring surface**
+for the same stable drizzle-orm copy: one import for tables, columns,
+relations, operators, and `sql` (see [Schema authoring with `dbsdk/orm`](#schema-authoring-with-dbsdkorm)).
+
 dbSDK does not fork or wrap Drizzle. Schemas and builders are imported from
-`drizzle-orm` directly; the bridge only supplies the connection and refuses
-anything that would bypass it. There is no claim of full Drizzle parity here —
-Studio, Kit, seed, and validators are separate tools with their own licenses.
+`dbsdk/orm` (a pure re-export) or from `drizzle-orm` directly — both resolve
+to the same stable 0.45.3 API; the bridge only supplies the connection and
+refuses anything that would bypass it. There is no claim of full Drizzle
+parity here — Studio, Kit, seed, and validators are separate tools with their
+own licenses.
 
 ## Install
 
@@ -71,6 +77,80 @@ is preserved exactly.
   `$client` set to the dbSDK-owned pool.
 - `drizzleNeonHttp(db, config?)` → Drizzle's `NeonHttpDatabase<TSchema>` with
   `$client` set to the dbSDK-owned neon query function.
+
+## Schema authoring with `dbsdk/orm`
+
+`dbsdk/orm` is a pure re-export of the stable `drizzle-orm` 0.45.3 root and
+`pg-core` namespaces as a single import — no renames, no wrappers, no
+upstream code copied, zero runtime logic (no connection, no pool, no
+dispatch). It is PostgreSQL-focused authoring only: no other dialect
+surfaces, and no Studio, Kit, seed, or migration tooling is shipped here.
+
+```ts
+import { createDatabase } from "dbsdk";
+import { postgres } from "dbsdk/postgres";
+import { drizzlePostgres } from "dbsdk/drizzle";
+// Authoring comes from ONE import; execution still goes through dbsdk/drizzle.
+import { pgSchema, pgTable, serial, text, integer, relations, eq, asc } from "dbsdk/orm";
+
+const app = pgSchema("myapp");
+export const users = app.table("users", {
+  id: serial("id").primaryKey(),
+  email: text("email").notNull(),
+});
+export const posts = app.table("posts", {
+  id: serial("id").primaryKey(),
+  authorId: integer("author_id").notNull(),
+  title: text("title"),
+});
+export const usersRelations = relations(users, ({ many }) => ({ posts: many(posts) }));
+export const postsRelations = relations(posts, ({ one }) => ({
+  author: one(users, { fields: [posts.authorId], references: [users.id] }),
+}));
+
+const db = createDatabase({
+  adapter: postgres({ connectionString: process.env.DATABASE_URL! }),
+});
+
+const drizzleDb = await drizzlePostgres(db, {
+  schema: { users, posts, usersRelations, postsRelations },
+});
+
+// Typed join select + relational query on the dbSDK-owned pool.
+const joined = await drizzleDb
+  .select({ email: users.email, title: posts.title })
+  .from(users)
+  .innerJoin(posts, eq(posts.authorId, users.id));
+const feed = await drizzleDb.query.users.findMany({ with: { posts: true } });
+
+await db.close(); // YOU still own the lifetime — Drizzle never ends the pool
+```
+
+Behavior details:
+
+- **Same optional peer as the bridge.** `dbsdk/orm` re-exports the exact
+  objects `dbsdk/drizzle` resolves, so a normal install has one physical
+  drizzle-orm copy and schemas authored through the facade just work through
+  the bridge. This shared-peer resolution is the mechanism that keeps a
+  second incompatible copy out of a normal install — it is not an absolute
+  guarantee against unusual dependency layouts that force one.
+- **Without the peer, only this subpath fails.** The `dbsdk` root entry never
+  imports `dbsdk/orm`. If `drizzle-orm` is not installed, importing
+  `dbsdk/orm` fails with Node's standard module-resolution error naming the
+  missing dependency (root imports are unaffected); `dbsdk/drizzle` keeps its
+  actionable factory-time refusal.
+- **Full upstream surface, familiar API.** The `export *` re-exports keep
+  100% upstream API fidelity (the five type names exported by both root and
+  pg-core resolve explicitly to the pg-core specializations). Two stable
+  quirks to know: `one`/`many` are callback-injected inside
+  `relations(table, ({ one, many }) => …)`, not module-level exports, and
+  pg-core's client-free `QueryBuilder` is SELECT-only — INSERT/UPDATE/DELETE
+  builders come from an instance created via `dbsdk/drizzle`.
+- **Strict TypeScript.** The packed declarations compile under NodeNext +
+  `exactOptionalPropertyTypes` + `noUncheckedIndexedAccess` with zero
+  dbSDK-attributed errors (`skipLibCheck: true`; with `skipLibCheck: false`
+  the ~72 reported errors are all inside drizzle-orm's own published d.ts —
+  the same upstream boundary as the bridge, unchanged by the facade).
 
 ## Supported modes
 

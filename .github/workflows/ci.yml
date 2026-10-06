@@ -26,3 +26,39 @@ jobs:
         run: pnpm --filter dbsdk build
       - name: Pack check
         run: pnpm --filter dbsdk pack:check
+
+  orm-smoke:
+    name: ORM facade packed smoke (dbsdk/orm)
+    runs-on: ubuntu-latest
+    services:
+      # Mirrors the authorized local dbsdk-pg-test container (PostgreSQL 17,
+      # port 15432) so the smoke's live leg runs in CI with real PG instead
+      # of being claimed local-only. Credentials match the script's own
+      # documented local default (dbsdk-pg-test container config).
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: dbsdk
+          POSTGRES_DB: dbsdk
+        ports:
+          - 15432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d dbsdk"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.18
+          cache: pnpm
+      - name: Install workspace dependencies
+        run: pnpm install --frozen-lockfile
+      - name: ORM facade packed-tarball smoke (build + pack + real consumers + live PG)
+        working-directory: packages/dbsdk
+        env:
+          DBSDK_TEST_POSTGRES_URL: postgresql://postgres:dbsdk@localhost:15432/dbsdk
+        run: node scripts/orm-exports-smoke.mjs

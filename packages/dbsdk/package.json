@@ -67,6 +67,11 @@
       "import": "./dist/drizzle-interop/index.js",
       "default": "./dist/drizzle-interop/index.js"
     },
+    "./orm": {
+      "types": "./dist/orm-facade/index.d.ts",
+      "import": "./dist/orm-facade/index.js",
+      "default": "./dist/orm-facade/index.js"
+    },
     "./sync": {
       "types": "./dist/sync/index.d.ts",
       "import": "./dist/sync/index.js",

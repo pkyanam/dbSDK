@@ -21,12 +21,13 @@ marketing.
 | Parameterized SQL, capability/evidence model, normalized errors, indeterminate-write semantics | `src/core/database.ts`, `src/sql.ts`, `src/capabilities.ts`, `src/errors.ts` | `tests/core/**` |
 | Drizzle execution over dbSDK-owned handles: `drizzlePostgres` / `drizzleNeonHttp` with mode gates (DSN/connection/client refused before dispatch; `sessionState:false` poolers refused before pool creation) | `src/drizzle-interop/index.ts` | `tests/drizzle-interop.test.ts` (accepted r3) |
 | Resumable transfer | `src/sync/**` | sync acceptance |
-| Schema-authoring import surface `dbsdk/orm` (planned entry name) — pure re-export of stable drizzle-orm 0.45.3 root + pg-core, unwired | `src/orm-facade/index.ts` | `tests/orm-facade.test.ts` 7/7 + `tests/types/orm-facade.test-d.ts` 5/5 + whole-package `tsc --noEmit` clean. **NOT a public API until wired + accepted.** |
+| Schema-authoring import surface `dbsdk/orm` — pure re-export of stable drizzle-orm 0.45.3 root + pg-core. **Integrated in the public tree** as an optional subpath (`dbsdk/orm` export + tsdown entry + packed-consumer smoke; independently accepted in `coordination/orm-public-acceptance-r4.md`) — no full-Drizzle-parity claim (PostgreSQL authoring only; execution, capabilities, and lifetime stay with `dbsdk/drizzle`) | `src/orm-facade/index.ts` | `tests/orm-facade.test.ts` 7/7 + `tests/types/orm-facade.test-d.ts` 5/5 + `tests/orm-facade-acceptance-r2.test.ts` 12/12 + `tests/orm-facade-acceptance-r4.test.ts` 8/8 + whole-package `tsc --noEmit` clean + `scripts/orm-exports-smoke.mjs` (fresh packed consumers: zero-peer root works / subpath-only native refusal; strict NodeNext + EOPT + NUIA inference with non-vacuous negatives; runtime identity vs direct drizzle-orm; live PG through the frozen bridge). **Public API: optional subpath requiring the `drizzle-orm` peer.** |
 
 Simplicity measures (actual counts, not claims):
 
-- Author + execute a typed schema with the planned surface: **2 imports**
-  (`dbsdk` + `dbsdk/orm`) + 1 factory call (`drizzlePostgres`) vs today's 3+ imports
+- Author + execute a typed schema with `dbsdk/orm` (integrated, optional
+  public subpath): **2 imports** (`dbsdk` + `dbsdk/orm`) + 1 factory call
+  (`drizzlePostgres`) vs today's 3+ imports
   (`dbsdk`, `dbsdk/drizzle`, `drizzle-orm`, `drizzle-orm/pg-core`).
 - The facade's `export *` keeps 100% upstream API fidelity: 118 root + 212 pg-core exports,
   zero renames, zero shims; the 5 doubly-exported type names resolve explicitly to the

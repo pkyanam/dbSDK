@@ -41,7 +41,13 @@ guard semantics on the pooled path (6432, PgBouncer), plus the adapter's
 mandatory verified-TLS policy and explicit direct/pooled port validation —
 details and evidence in the [PlanetScale Postgres adapter](/docs/adapters/planetscale).
 If you use Drizzle ORM, the optional `dbsdk/drizzle` bridge preserves exactly
-these guarantees on the same pool; see [Drizzle](/docs/drizzle).
+these guarantees on the same pool; see [Drizzle](/docs/drizzle). The optional
+`dbsdk/orm` subpath is the matching schema-authoring surface: a pure re-export
+of stable drizzle-orm (root + pg-core, PostgreSQL authoring only) with **no
+runtime capabilities of its own** — no connections, no dispatch, no capability
+rows in the table above. Everything a `dbsdk/orm`-authored schema executes
+inherits the adapter/transport capabilities of the `dbsdk/drizzle` bridge it
+runs through; the per-adapter rows in this matrix remain the source of truth.
 
 ## What "session state" means here
 

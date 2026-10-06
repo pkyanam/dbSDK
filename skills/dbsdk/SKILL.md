@@ -1,5 +1,5 @@
 ---
-description: Work with dbSDK, the SDK to create, manage, and query databases on providers like Supabase, Neon, and PlanetScale Postgres. Use when writing or reviewing code that imports dbsdk, dbsdk/postgres, dbsdk/supabase, dbsdk/neon, dbsdk/planetscale, dbsdk/drizzle, dbsdk/testing, dbsdk/management, dbsdk/management/supabase, dbsdk/management/neon, dbsdk/management/planetscale, dbsdk/management/testing, or dbsdk/sync - covers the real API on both planes plus Drizzle ORM interop and resumable transfer (createDatabase with db.sql, db.query, db.batch, db.transaction; createManagement with create, list, get, update, delete, wait; drizzlePostgres/drizzleNeonHttp over dbSDK-owned connections; runTransfer with createSqlSource/createSqlTarget), parameterization rules, capability and scope checks, credential distinctions, transaction semantics, and the guardrails that keep queries injection-safe and writes unreplayed.
+description: Work with dbSDK, the SDK to create, manage, and query databases on providers like Supabase, Neon, and PlanetScale Postgres. Use when writing or reviewing code that imports dbsdk, dbsdk/postgres, dbsdk/supabase, dbsdk/neon, dbsdk/planetscale, dbsdk/drizzle, dbsdk/orm, dbsdk/testing, dbsdk/management, dbsdk/management/supabase, dbsdk/management/neon, dbsdk/management/planetscale, dbsdk/management/testing, or dbsdk/sync - covers the real API on both planes plus Drizzle ORM interop, Drizzle schema authoring, and resumable transfer (createDatabase with db.sql, db.query, db.batch, db.transaction; createManagement with create, list, get, update, delete, wait; drizzlePostgres/drizzleNeonHttp over dbSDK-owned connections; pgTable/columns/relations/eq/sql re-exported by dbsdk/orm; runTransfer with createSqlSource/createSqlTarget), parameterization rules, capability and scope checks, credential distinctions, transaction semantics, and the guardrails that keep queries injection-safe and writes unreplayed.
 ---
 
 # dbSDK skill
@@ -21,6 +21,10 @@ dbSDK backend and no credential proxying.
 - `dbsdk/testing`: scripted query fixture.
 - `dbsdk/drizzle`: optional Drizzle ORM interop (`drizzlePostgres`,
   `drizzleNeonHttp`); lazy — needs the `drizzle-orm` peer only at factory call.
+- `dbsdk/orm`: optional Drizzle schema authoring surface (`pgTable`,
+  columns, indexes, `relations`, operators, `sql`) — a single pure re-export
+  of stable drizzle-orm root + pg-core; needs the `drizzle-orm` peer at
+  import time; PostgreSQL authoring only, no runtime logic.
 - `dbsdk/sync`: `runTransfer`, `createSqlSource`, `createSqlTarget`,
   `createMemoryCheckpointStore` - one-way resumable transfer between
   databases.
@@ -87,14 +91,46 @@ const drizzleDb = await drizzlePostgres(db, { schema }); // async: lazy-imports 
   `client` configs, and closed databases are refused BEFORE any pool
   creation or raw access.
 - Config is `{ schema, logger, casing }` — generic inference preserved.
-  Import schemas/builders from `drizzle-orm` directly; nothing is
-  re-exported.
+  Import schemas/builders from `dbsdk/orm` (single re-export surface of the
+  same stable copy) or from `drizzle-orm`/`drizzle-orm/pg-core` directly;
+  both resolve to the same objects, so schemas authored either way run
+  through the bridge identically.
 - Honest boundaries: queries through the returned instance surface native
   Drizzle/driver errors (not normalized `DbError`); `db.close()` ends the
   pool and the previously returned instance then fails (no recreation);
   Neon HTTP instances keep working after close (nothing to release). No
   full-parity claim: Studio, Kit, seed, and migrations are separate
   upstream tools, not implemented here.
+
+## Schema authoring (`dbsdk/orm`, optional)
+
+```ts
+import { pgTable, pgSchema, serial, text, integer, relations, eq } from "dbsdk/orm";
+
+const app = pgSchema("myapp");
+export const users = app.table("users", {
+  id: serial("id").primaryKey(),
+  email: text("email").notNull(),
+});
+export const posts = app.table("posts", {
+  id: serial("id").primaryKey(),
+  authorId: integer("author_id").notNull().references(() => users.id),
+  title: text("title"),
+});
+export const usersRelations = relations(users, ({ many }) => ({ posts: many(posts) }));
+```
+
+- One import for the whole PostgreSQL authoring surface (stable
+  `drizzle-orm@^0.45.3` root + pg-core; no 1.0 RC/beta features implied).
+  Pure re-export: no renames, no wrappers, no dbSDK runtime logic.
+- Requires the `drizzle-orm` optional peer at import time; without it the
+  subpath import fails with the native module-resolution error (the `dbsdk`
+  root entry is unaffected). The five doubly-exported type names resolve to
+  the pg-core specializations; `one`/`many` are callback-injected inside
+  `relations()`, not module exports; client-free `QueryBuilder` is
+  SELECT-only.
+- Execution is separate: hand the schema to `dbsdk/drizzle`
+  (`drizzlePostgres`/`drizzleNeonHttp`) over a dbSDK-owned connection.
 
 ## Management plane (control plane)
 

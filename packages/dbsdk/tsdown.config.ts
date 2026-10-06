@@ -27,6 +27,15 @@ if (existsSync('src/sync/index.ts')) entry.push('src/sync/index.ts');
 /** Optional Drizzle interop entry (dbsdk/drizzle): lazy runtime imports of drizzle-orm inside. */
 if (existsSync('src/drizzle-interop/index.ts')) entry.push('src/drizzle-interop/index.ts');
 
+/**
+ * ORM authoring facade entry (dbsdk/orm): static re-export surface of the
+ * drizzle-orm optional peer (root + pg-core). Unlike the drizzle entry, this
+ * module is intentionally NOT lazy — it is a type/authoring surface whose
+ * static `export * from 'drizzle-orm'` must stay external so consumers get
+ * their own (single) drizzle-orm copy, identical to the one the bridge uses.
+ */
+if (existsSync('src/orm-facade/index.ts')) entry.push('src/orm-facade/index.ts');
+
 export default defineConfig({
   entry,
   format: 'esm',

@@ -110,7 +110,7 @@
     {
       "slug": "docs/drizzle",
       "title": "Drizzle",
-      "description": "Optional Drizzle ORM interoperability over dbSDK-owned connections: typed schema queries on the same pool, with lifetime, TLS, and pooler guards preserved.",
+      "description": "Optional Drizzle ORM interoperability and schema authoring (dbsdk/orm) over dbSDK-owned connections: typed schema queries on the same pool, with lifetime, TLS, and pooler guards preserved.",
       "order": 16
     },
     {
