@@ -13,6 +13,9 @@
  * - Error fixtures throw the given error as-is; the core client normalizes it.
  * - Every executed query is recorded on `raw.queries` for assertions.
  * - A query that matches no fixture throws DbError code 'UNKNOWN' (loud failure).
+ *   Set `requireMatch: false` to return an empty, count-less result instead
+ *   (`rows: []`, `rowCount: null`); unmatched queries are still recorded, and
+ *   nothing pretends a real database executed them.
  */
 
 import { DbError } from './errors.js';
@@ -59,7 +62,18 @@ export type FixtureAdapterOptions = {
   capabilities?: Partial<Omit<DatabaseAdapterCapabilities, 'evidence'>>;
   evidence?: Readonly<Record<string, DatabaseAdapterCapabilities['evidence'][string]>>;
   fixtures?: readonly Fixture[];
-  /** Throw when a query matches no fixture (default true). */
+  /**
+   * Throw when a query matches no fixture (default true).
+   *
+   * When `false`, an unmatched query — including one whose only matching
+   * fixture is already exhausted — resolves with an empty, count-less result
+   * (`rows: []`, `rowCount: null`, command derived from the text) instead of
+   * throwing. Matched fixtures still return their scripted data unchanged,
+   * and unmatched queries are still recorded on `raw.queries` / passed to
+   * `onQuery`. The fixture adapter does not simulate a real database for
+   * unmatched statements: the empty result carries no fabricated rows or
+   * write counts.
+   */
   requireMatch?: boolean;
   onQuery?: (query: RecordedQuery) => void;
 };
@@ -152,9 +166,12 @@ export function createFixtureAdapter(options: FixtureAdapterOptions = {}): Fixtu
     options.onQuery?.(entry);
   }
 
-  function takeFixture(text: string, params: readonly unknown[]): Fixture {
+  function takeFixture(text: string, params: readonly unknown[]): Fixture | undefined {
     const state = states.find((candidate) => isMatch(candidate, text, params));
     if (!state) {
+      // requireMatch: false lets unmatched queries through with an empty
+      // result (handled in `execute`) instead of failing loudly.
+      if (!requireMatch) return undefined;
       throw new DbError(
         `No fixture matched query: ${normalizeText(text)}`,
         { code: 'UNKNOWN', adapterId: id, retryable: false, indeterminate: false },
@@ -171,6 +188,16 @@ export function createFixtureAdapter(options: FixtureAdapterOptions = {}): Fixtu
   ): QueryResult {
     record(text, params, inTransaction);
     const fixture = takeFixture(text, params);
+    if (fixture === undefined) {
+      // Unmatched with requireMatch: false. Deliberately an empty, count-less
+      // result: no fabricated rows, no fake write count — the recording on
+      // `raw.queries` remains the source of truth for what was "sent".
+      return {
+        rows: [],
+        rowCount: null,
+        command: commandFromText(text),
+      };
+    }
     if (!isQueryFixture(fixture)) {
       throw fixture.error;
     }

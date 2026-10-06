@@ -156,6 +156,75 @@ describe('createFixtureAdapter', () => {
   });
 });
 
+describe('requireMatch: false', () => {
+  it('resolves unmatched queries with an empty, count-less result instead of throwing', async () => {
+    const adapter = createFixtureAdapter({ fixtures: [], requireMatch: false });
+    await expect(adapter.query('UPDATE t SET x = 1', [])).resolves.toEqual({
+      rows: [],
+      rowCount: null,
+      command: 'UPDATE',
+    });
+    await expect(adapter.query('select 1', [])).resolves.toEqual({
+      rows: [],
+      rowCount: null,
+      command: 'SELECT',
+    });
+  });
+
+  it('still records unmatched queries on raw.queries and onQuery', async () => {
+    const onQuery = vi.fn();
+    const adapter = createFixtureAdapter({ requireMatch: false, onQuery });
+    await adapter.query('select 42', [7]);
+    expect(adapter.raw.queries).toEqual([{ text: 'select 42', params: [7], inTransaction: false }]);
+    expect(onQuery).toHaveBeenCalledWith({ text: 'select 42', params: [7], inTransaction: false });
+  });
+
+  it('lets exhausted single-use fixtures fall through to an empty result', async () => {
+    const adapter = createFixtureAdapter({
+      requireMatch: false,
+      fixtures: [{ match: 'select 1', rows: [{ n: 1 }] }],
+    });
+    await expect(adapter.query('select 1', [])).resolves.toMatchObject({ rows: [{ n: 1 }] });
+    // Fixture is single-use and now exhausted: no longer throws, falls through.
+    await expect(adapter.query('select 1', [])).resolves.toEqual({
+      rows: [],
+      rowCount: null,
+      command: 'SELECT',
+    });
+  });
+
+  it('matched fixtures still take precedence over the empty fallback', async () => {
+    const adapter = createFixtureAdapter({
+      requireMatch: false,
+      fixtures: [{ match: 'select 1', rows: [{ n: 1 }], repeat: true }],
+    });
+    await expect(adapter.query('select 1', [])).resolves.toEqual({ rows: [{ n: 1 }], rowCount: 1, command: 'SELECT' });
+    await expect(adapter.query('select 2', [])).resolves.toEqual({ rows: [], rowCount: null, command: 'SELECT' });
+  });
+
+  it('scopes and records unmatched transaction queries as inTransaction', async () => {
+    const adapter = createFixtureAdapter({ requireMatch: false });
+    const result = await adapter.transaction!(async (tx) => {
+      const r = await tx.query('insert into t (a) values ($1)', [1]);
+      return r.rowCount;
+    });
+    expect(result).toBeNull();
+    expect(adapter.raw.queries).toEqual([
+      { text: 'insert into t (a) values ($1)', params: [1], inTransaction: true },
+    ]);
+  });
+
+  it('returns per-statement empty results for unmatched batch statements', async () => {
+    const adapter = createFixtureAdapter({ requireMatch: false });
+    const results = await adapter.batch!([{ text: 'insert into t values (1)' }, { text: 'select 1' }]);
+    expect(results).toEqual([
+      { rows: [], rowCount: null, command: 'INSERT' },
+      { rows: [], rowCount: null, command: 'SELECT' },
+    ]);
+    expect(adapter.raw.queries).toHaveLength(2);
+  });
+});
+
 describe('createFixtureDatabase', () => {
   it('returns a full dbSDK client wired to the fixture adapter', async () => {
     const db = createFixtureDatabase({
@@ -163,6 +232,23 @@ describe('createFixtureDatabase', () => {
     });
     const result = await db.sql<{ id: number }>`select * from users where id = ${1}`;
     expect(result.rows).toEqual([{ id: 1 }]);
+    expect(db.raw.queries).toHaveLength(1);
+    await db.close();
+  });
+
+  it('resolves unmatched queries through the client when requireMatch: false', async () => {
+    const db = createFixtureDatabase({ requireMatch: false });
+    await expect(db.sql`select * from anything`).resolves.toMatchObject({
+      rows: [],
+      rowCount: null,
+    });
+    expect(db.raw.queries).toHaveLength(1);
+    await db.close();
+  });
+
+  it('still rejects unmatched queries through the client by default', async () => {
+    const db = createFixtureDatabase();
+    await expect(db.sql`select * from anything`).rejects.toMatchObject({ code: 'UNKNOWN' });
     expect(db.raw.queries).toHaveLength(1);
     await db.close();
   });
