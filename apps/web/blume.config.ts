@@ -13,10 +13,20 @@ export default defineConfig({
   },
 
   content: {
-    // Top-level .mdx here is the web agent's canonical stub area; the full
-    // documentation lives in content/docs/ (docs agent).
+    // All documentation lives in content/docs/ (docs agent): 13 pages under
+    // /docs/*. The former top-level /getting-started and /capabilities stub
+    // pages were removed; their old URLs 301-redirect below.
     root: "content",
   },
+
+  // Legacy prototype URLs from the stub area keep resolving, straight to the
+  // canonical full documentation. Exact redirects (no patterns, no catch-all):
+  // the deleted stub pages' URLs only. Markdown mirrors move with the page
+  // automatically (/getting-started.md -> /docs/getting-started.md).
+  redirects: [
+    { from: "/getting-started", to: "/docs/getting-started", status: 301 },
+    { from: "/capabilities", to: "/docs/capabilities", status: 301 },
+  ],
 
   theme: {
     accent: { light: "#c1121f", dark: "#669bbc" },
@@ -156,8 +166,8 @@ export default defineConfig({
 
   footer: {
     links: [
-      { label: "Docs", href: "/getting-started" },
-      { label: "Capabilities", href: "/capabilities" },
+      { label: "Docs", href: "/docs/getting-started" },
+      { label: "Capabilities", href: "/docs/capabilities" },
       { label: "Agent surface", href: "/#agents" },
     ],
   },
