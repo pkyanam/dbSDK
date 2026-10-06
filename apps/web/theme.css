@@ -160,3 +160,13 @@ html {
   color: var(--dbsdk-ink) !important;
   border-color: var(--dbsdk-line);
 }
+
+/* Header brand emblem (v3 circular db ligature, /brand/dbmark-512.webp):
+   the master is pure black on transparent so it reads on the light-mode
+   background as-is; in dark mode the same file is inverted to white with a
+   filter (exact color swap on a strictly black/white mark — alpha and
+   geometry untouched, same single source file). Scoped to the blume header
+   logo image only; nothing else is filtered. */
+:root[data-theme="dark"] header[data-blume-header] img[src="/brand/dbmark-512.webp"] {
+  filter: invert(1);
+}

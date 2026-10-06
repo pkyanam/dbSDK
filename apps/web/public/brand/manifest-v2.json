@@ -83,6 +83,21 @@
     "files": ["banner.png", "banner.webp", "banner-1280.webp", "banner-768.webp", "icon.png", "icon.webp", "icon-16.png", "icon-32.png", "icon-192.png", "icon-512.png", "manifest.json"]
   },
   "conversion": "resize (sips) + webp encode (cwebp 1.6.0 q85); no content edits outside imagegen. Round 5 icon verification: PNG structure parse (colortype/tRNS) + visual inspection + sips metadata; simple check sufficed for an RGB (colortype 2) file",
+  "iconV3": {
+    "status": "final, live",
+    "replaces": "icon (v2) as header logo + favicon seam; v2 files kept in /brand for record, no longer referenced",
+    "master": "design/assets/logo-r4/dbmark-master-alpha.png (1254x1254 RGBA, pure-black circular db ligature, transparent background/negative space)",
+    "displayCompanion": "design/assets/logo-r4/dbmark-master-display-white.png (ImageGen edit: transparent pixels -> pure white only; for user display, not served)",
+    "tool": "built-in ImageGen (logo-brand prompt; white companion via background-extraction edit); prompts verbatim in design/assets/logo-r4/PROVENANCE.md",
+    "header": "/brand/dbmark-512.webp (blume.config.ts logo.image); dark mode inverts the same file via theme.css [data-theme=dark] filter rule (exact black/white swap, alpha preserved)",
+    "favicon": {
+      "icon": "/icon.png (192, alpha, replaces prior same-path file)",
+      "appleTouch": "/apple-icon.png (180, mark composited on opaque white; no redraw)",
+      "ladder": "/brand/dbmark-{512,192,32,16}.png + dbmark-512.webp, sharp Lanczos resizes of the alpha master, original 14-16% padding preserved",
+      "measured": "mark 72.09% of canvas; padding L/R 13.96%, T 15.39%, B 12.92%; legible at 32px, recognizable at 16px"
+    },
+    "preserved": ["header wordmark text dbSDK", "openlaunch sponsor block + sponsors-openlaunch-icon.png", "homepage 2D grid", "social-card-v2.png"]
+  },
   "license": "original generated artwork for dbSDK; no third-party source imagery",
   "provenance": [
     "banner source: generated_images/exec-54586934-2f6a-4034-87ee-3c7ba349f577.png (1536x1024 RGB)",
