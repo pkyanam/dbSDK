@@ -1,53 +1,50 @@
-/* dbSDK theme: cream paper, navy structure, red accent.
-   Palette: #780000 deep red, #c1121f red, #fdf0d5 cream, #003049 navy,
-   #669bbc muted blue. Overrides Blume tokens; final layer of the cascade. */
+/* dbSDK theme: monochrome. White paper, near-black ink, gray muted text,
+   hairline gray borders, square corners. Dark mode is the true inverse:
+   black paper, white ink. Overrides Blume tokens; final layer of the
+   cascade. No chromatic color anywhere on the site. */
 
 :root {
-  --blume-background: #fdf0d5;
-  --blume-foreground: #003049;
-  --blume-muted: #f6e3c5;
-  --blume-muted-foreground: #3a5a70;
-  --blume-border: #e0cda9;
-  --blume-accent: #c1121f;
-  --blume-accent-foreground: #fdf0d5;
-  --blume-action: #c1121f;
-  --blume-action-foreground: #fdf0d5;
-  --blume-code-background: #003049;
-  --blume-radius: 0.25rem;
+  --blume-background: #ffffff;
+  --blume-foreground: #111111;
+  --blume-muted: #f5f5f5;
+  --blume-muted-foreground: #666666;
+  --blume-border: #e5e5e5;
+  --blume-accent: #111111;
+  --blume-accent-foreground: #ffffff;
+  --blume-action: #111111;
+  --blume-action-foreground: #ffffff;
+  --blume-code-background: #111111;
+  --blume-radius: 0rem;
 
-  /* dbSDK extended palette (site-specific, not Blume tokens) */
-  --dbsdk-cream: #fdf0d5;
-  --dbsdk-cream-deep: #f6e3c5;
-  --dbsdk-navy: #003049;
-  --dbsdk-navy-deep: #001a2b;
-  --dbsdk-red: #c1121f;
-  --dbsdk-red-deep: #780000;
-  --dbsdk-blue: #669bbc;
-  --dbsdk-ink-soft: #3a5a70;
-  --dbsdk-border: #e0cda9;
+  /* dbSDK extended palette (site-specific, monochrome) */
+  --dbsdk-paper: #ffffff;
+  --dbsdk-ink: #111111;
+  --dbsdk-ink-soft: #666666;
+  --dbsdk-line: #e5e5e5;
+  --dbsdk-panel: #111111;
+  --dbsdk-panel-ink: #ffffff;
+  --dbsdk-chip: #f5f5f5;
 }
 
 :root[data-theme="dark"] {
-  --blume-background: #001a2b;
-  --blume-foreground: #fdf0d5;
-  --blume-muted: #002842;
-  --blume-muted-foreground: #a9c1d1;
-  --blume-border: #1d3a50;
-  --blume-accent: #669bbc;
-  --blume-accent-foreground: #001a2b;
-  --blume-action: #c1121f;
-  --blume-action-foreground: #fdf0d5;
-  --blume-code-background: #001626;
+  --blume-background: #000000;
+  --blume-foreground: #ffffff;
+  --blume-muted: #111111;
+  --blume-muted-foreground: #a3a3a3;
+  --blume-border: #262626;
+  --blume-accent: #ffffff;
+  --blume-accent-foreground: #000000;
+  --blume-action: #ffffff;
+  --blume-action-foreground: #000000;
+  --blume-code-background: #111111;
 
-  --dbsdk-cream: #fdf0d5;
-  --dbsdk-cream-deep: #f6e3c5;
-  --dbsdk-navy: #002842;
-  --dbsdk-navy-deep: #00101c;
-  --dbsdk-red: #c1121f;
-  --dbsdk-red-deep: #780000;
-  --dbsdk-blue: #669bbc;
-  --dbsdk-ink-soft: #a9c1d1;
-  --dbsdk-border: #1d3a50;
+  --dbsdk-paper: #000000;
+  --dbsdk-ink: #ffffff;
+  --dbsdk-ink-soft: #a3a3a3;
+  --dbsdk-line: #262626;
+  --dbsdk-panel: #111111;
+  --dbsdk-panel-ink: #ffffff;
+  --dbsdk-chip: #161616;
 }
 
 /* Anchor offsets and focus visibility for the whole site, docs included. */
@@ -55,11 +52,11 @@ html {
   scroll-padding-top: 5.5rem;
 }
 :focus-visible {
-  outline: 2px solid var(--dbsdk-red);
+  outline: 2px solid currentColor;
   outline-offset: 2px;
 }
 ::selection {
-  background: rgba(193, 18, 31, 0.22);
+  background: rgba(128, 128, 128, 0.35);
 }
 @media (prefers-reduced-motion: reduce) {
   *,
@@ -73,43 +70,93 @@ html {
 }
 
 /* ---------------------------------------------------------------------------
-   Docs code contrast (verified browser defect).
+   Docs code surfaces (grayscale).
 
-   Blume renders every Shiki surface with the github-dark token palette in both
-   modes, but forces `pre.astro-code` backgrounds to transparent, so dark tokens
-   landed on the cream page background and were unreadable. Inline code took
-   `--blume-code-background` (navy) under `--blume-foreground` (also navy),
-   rendering as solid navy bars.
+   Blume renders Shiki with the github-dark token palette in both modes and
+   forces `pre.astro-code` backgrounds transparent, so token colors landed on
+   the page background and inline code collapsed into unreadable bars.
 
-   Fix, scoped to prose (docs pages only; the homepage uses .dk-* classes):
-   - Code blocks get a navy-deep panel like the homepage code blocks, with
-     cream plain code. The dark github-dark token colors are readable on it.
-   - Inline code becomes navy on a subtle cream chip in light mode and cream
-     on a navy chip in dark mode. Both keep the four-color palette.
+   Monochrome fix, scoped to prose (docs pages; the homepage owns its own
+   classes):
+   - Code blocks sit on a near-black panel in both modes with light plain
+     code. The syntax tokens are forced to gray via a grayscale filter, so
+     relative emphasis survives but no chromatic color does.
+   - Inline code becomes ink on a light chip in light mode and white on a
+     dark chip in dark mode.
    --------------------------------------------------------------------------- */
 
-/* Code blocks: navy panel, cream plain code, visible language header. */
+/* Code blocks: near-black panel in both modes with a single readable
+   plain-code gray. The language label and icon sit on that dark panel, so
+   they get a fixed light gray (~#bdbdbd) regardless of theme instead of
+   the muted ink token, which was too dark in light mode.
+
+   Syntax tokens: Blume renders Shiki's github-dark palette in both modes
+   via per-span CSS variables. The tokens are legible chromatic colors on
+   GitHub's backgrounds but several gray out too dark on this near-black
+   panel (a grayscale filter alone kept those dim values), so every token
+   span is flattened to one gray (#d4d4d4, 12.7:1 on the panel). The
+   block-level grayscale filter stays as a safety net for anything else
+   chromatic inside the block (e.g. the copy button's green confirmation
+   check); it changes hue only, never lightness, so the panel, border,
+   header, and buttons keep their exact values. */
 .prose pre.astro-code,
 .prose .blume-panel-tabs pre.astro-code,
 .blume-panel-tabs pre.astro-code {
-  background-color: var(--dbsdk-navy-deep) !important;
-  color: var(--dbsdk-cream) !important;
+  background-color: var(--dbsdk-panel) !important;
+  color: #d4d4d4 !important;
+  border: 1px solid var(--dbsdk-line);
+  filter: grayscale(1);
+}
+.prose pre.astro-code span,
+.blume-panel-tabs pre.astro-code span {
+  color: #d4d4d4 !important;
 }
 .prose pre[data-language]:before {
-  color: var(--dbsdk-blue);
+  color: #bdbdbd;
 }
 .prose pre[data-language][data-icon]:after {
-  background-color: var(--dbsdk-blue);
+  background-color: #bdbdbd;
 }
 
-/* Inline code: navy text on a cream chip (light), cream on navy (dark). */
+/* Code action buttons (copy, ask, expand), injected by Blume's client
+   script as small chips inside the block header area:
+   button[data-blume-copy] / [data-blume-ask] / [data-blume-code-expand].
+   The Blume default is a white chip with a muted icon, which glared
+   against the near-black panel in light mode. Scoped to .prose and the
+   three data attributes only (never site-wide), so no navigation or
+   sidebar button is touched: the chips get the same near-black chrome as
+   the panel with a clearly visible border, a light icon, and distinct
+   hover/focus states. The copy confirmation check is already green in
+   Blume's markup; the block's grayscale filter keeps it monochrome. */
+.prose [data-blume-copy],
+.prose [data-blume-ask],
+.prose [data-blume-code-expand] {
+  background-color: #262626;
+  color: #e5e5e5;
+  border: 1px solid #404040;
+  box-shadow: none;
+}
+.prose [data-blume-copy]:hover,
+.prose [data-blume-ask]:hover,
+.prose [data-blume-code-expand]:hover {
+  background-color: #404040;
+  color: #ffffff;
+}
+.prose [data-blume-copy]:focus-visible,
+.prose [data-blume-ask]:focus-visible,
+.prose [data-blume-code-expand]:focus-visible {
+  outline: 2px solid #e5e5e5;
+  outline-offset: 1px;
+}
+
+/* Inline code: ink on a light chip (light), white on a dark chip (dark). */
 .prose :not(pre) > code {
-  background-color: var(--dbsdk-cream-deep) !important;
-  color: var(--dbsdk-navy) !important;
-  border: 1px solid var(--dbsdk-border);
+  background-color: var(--dbsdk-chip) !important;
+  color: var(--dbsdk-ink) !important;
+  border: 1px solid var(--dbsdk-line);
 }
 :root[data-theme="dark"] .prose :not(pre) > code {
-  background-color: var(--dbsdk-navy) !important;
-  color: var(--dbsdk-cream) !important;
-  border-color: var(--dbsdk-border);
+  background-color: var(--dbsdk-chip) !important;
+  color: var(--dbsdk-ink) !important;
+  border-color: var(--dbsdk-line);
 }

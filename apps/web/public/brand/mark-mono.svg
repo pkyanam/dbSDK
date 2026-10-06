@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="dbSDK mark">
+  <!-- dbSDK monochrome mark: white tile, black database cylinder glyph. -->
+  <rect width="512" height="512" rx="96" fill="#ffffff"/>
+  <g fill="none" stroke="#111111" stroke-width="44" stroke-linecap="round">
+    <ellipse cx="256" cy="186" rx="108" ry="44"/>
+    <path d="M148 186 V326"/>
+    <path d="M364 186 V326"/>
+    <path d="M148 326 A108 44 0 0 0 364 326"/>
+  </g>
+</svg>

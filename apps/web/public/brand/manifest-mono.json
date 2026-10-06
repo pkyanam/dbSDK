@@ -1,0 +1,20 @@
+{
+  "$comment": "Monochrome brand assets. All rasters are renders of mark-mono.svg (white tile, black database-cylinder glyph). The chromatic v2 icon and banner assets were removed from /brand per the monochrome redesign mandate; generation masters remain under design/assets/ for the record.",
+  "status": "final",
+  "palette": ["#ffffff", "#111111"],
+  "sourceSvg": "/brand/mark-mono.svg",
+  "files": {
+    "icon-v2.webp": { "size": 512, "format": "webp", "renderedFrom": "mark-mono.svg" },
+    "icon-v2-512.webp": { "size": 512, "format": "webp", "renderedFrom": "mark-mono.svg" },
+    "icon-v2.png": { "size": 1024, "format": "png", "renderedFrom": "mark-mono.svg" },
+    "icon-v2-512.png": { "size": 512, "format": "png", "renderedFrom": "mark-mono.svg" },
+    "icon-v2-192.png": { "size": 192, "format": "png", "renderedFrom": "mark-mono.svg" },
+    "icon-v2-32.png": { "size": 32, "format": "png", "renderedFrom": "mark-mono.svg" },
+    "icon-v2-16.png": { "size": 16, "format": "png", "renderedFrom": "mark-mono.svg" },
+    "public/icon.png": { "size": 192, "format": "png", "renderedFrom": "mark-mono.svg" },
+    "public/apple-icon.png": { "size": 192, "format": "png", "renderedFrom": "mark-mono.svg" }
+  },
+  "removed": ["banner-v2.png", "banner-v2.webp", "banner-v2-1280.webp", "banner-v2-768.webp", "chromatic icon masters"],
+  "tooling": "sharp 0.35.5 rasterization, q90 webp",
+  "date": "2026-10-06"
+}

@@ -49,6 +49,38 @@ rows[0]?.email; // "ada@example.com"
 `createFixtureDatabase(options)` is a convenience that does both steps and
 returns the client directly, for when you only need the query surface.
 
+## Management fixture
+
+The management plane has its own fixture, `dbsdk/management/testing`. It is
+a handler-based scaffolding, not a simulator of any provider: you script
+what an adapter returns for each verb, and the real core client runs on
+top of it. That proves what the core does with results, errors, and
+capabilities, and that your code handles `ManagementError` codes,
+`indeterminate` writes, and secret redaction correctly. It cannot prove
+what a real provider API returns; that is the job of each adapter's
+recorded-HTTP tests and read-only live checks.
+
+```ts
+import { createManagementFixture } from "dbsdk/management/testing";
+
+const { adapter, client } = createManagementFixture({
+  id: "test",
+  handlers: {
+    create: async (spec) => ({
+      resource: { kind: spec.kind, providerId: "test", id: "res_1",
+        name: null, region: null, status: "active",
+        providerStatus: null, createdAt: null, updatedAt: null, raw: {} },
+      operation: null,
+      secrets: [],
+      indeterminate: false,
+    }),
+  },
+});
+
+await client.create({ kind: "project", name: "test" });
+adapter.raw.calls; // every recorded call
+```
+
 How matching works:
 
 - A string `match` is compared against the statement text with whitespace

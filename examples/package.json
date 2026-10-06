@@ -12,6 +12,9 @@
     "transactions": "tsx 02-batch-and-transaction.ts",
     "errors": "tsx 03-error-handling.ts",
     "server": "tsx 05-express-server.ts",
+    "management:fixture": "tsx 06-management-fixture.ts",
+    "management:neon": "tsx 07-management-neon-flow.ts",
+    "management:supabase": "tsx 08-management-supabase-flow.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

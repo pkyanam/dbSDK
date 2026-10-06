@@ -1,0 +1,284 @@
+---
+title: Management
+description: The control plane. Create, inspect, update, and delete provider resources with one verb set, then bridge to the query client.
+sidebar:
+  order: 12
+---
+
+The management layer is dbSDK's control plane. You bring a provider
+credential (a Supabase personal access token or a Neon API key) and get one
+stable verb set over the provider's resources: `create`, `list`, `get`,
+`update`, `delete`, and `wait`. It is the provisioning and lifecycle half of
+dbSDK; the query client is the other half.
+
+What it is not, stated plainly: there is no central dbSDK backend, no
+credential proxying, no automatic retry or replay of create or delete, and
+no silent fallback between providers. Every request goes from your process
+to the provider's official API with your credential.
+
+```ts
+import { createManagement } from "dbsdk/management";
+import { neonManagement } from "dbsdk/management/neon";
+
+const management = createManagement({
+  adapter: neonManagement({ apiKey: process.env.NEON_API_KEY! }),
+});
+```
+
+## The verb set
+
+| Verb | What it does |
+| --- | --- |
+| `create(spec)` | Creates a resource and returns a write result. |
+| `list(kind, query?)` | Lists resources of a kind. |
+| `get(ref)` | Fetches one resource. |
+| `update(spec)` | Patches a resource (per-kind availability). |
+| `delete(ref)` | Deletes a resource (per-kind availability). |
+| `wait(target)` | Polls until a write finishes; GET requests only. |
+
+Every call is checked against the adapter's declared capabilities **before
+dispatch**: an unsupported kind, verb, or pagination argument fails with a
+`ManagementError` of code `CAPABILITY` and nothing is sent. Scope rules are
+enforced the same way: a Neon database must carry both `projectId` and
+`branchId`, because that is how Neon actually addresses databases.
+
+## Create, wait, connect, query
+
+The full path on Neon, with the real option names:
+
+```ts
+import { createDatabase } from "dbsdk";
+import { createManagement } from "dbsdk/management";
+import { neon } from "dbsdk/neon";
+import { neonManagement } from "dbsdk/management/neon";
+
+const management = createManagement({
+  adapter: neonManagement({ apiKey: process.env.NEON_API_KEY! }),
+});
+
+// 1. Create the project. The write may involve several provider
+//    operations; the result carries them all.
+const result = await management.create({
+  kind: "project",
+  name: "my-app",
+});
+
+// 2. Wait until every operation finished. wait() issues GET requests
+//    only and never resubmits the create.
+const project = await management.wait(result, { timeoutMs: 120_000 });
+
+// 3. Credentials: Neon's create responses carry connection URIs and role
+//    passwords (shown once by Neon). dbSDK surfaces them only in
+//    result.secrets and redacts them from every raw payload and error.
+const secret = result.secrets.find((s) => s.label === "connectionString");
+
+// 4. An official connection URI on demand. By default the URI comes back
+//    with the password segment redacted; `reveal: true` is the explicit
+//    opt-in that returns the credential-bearing URI for connecting.
+//    The default database is `neondb` and its default role is
+//    `neondb_owner` — the ones a fresh project actually has.
+const uri = await management.raw.connectionUri({
+  projectId: project.id,
+  databaseName: "neondb",
+  roleName: "neondb_owner",
+  reveal: true,
+});
+
+// 5. Bridge to the query client. The management credential and the SQL
+//    connection string are different credentials; the URI from step 3 or
+//    4 is the one the query adapter needs.
+const db = createDatabase({
+  adapter: neon({ connectionString: uri, transport: "http" }),
+});
+```
+
+```ts
+type NeonConnectionUriInput = {
+  projectId: string;
+  branchId?: string;      // omit for the project's default branch
+  databaseName: string;   // required by the official endpoint
+  roleName: string;       // required by the official endpoint
+  pooled?: boolean;       // true returns the PgBouncer `-pooler` URI
+  reveal?: boolean;       // explicit opt-in to receive the real password
+};
+```
+
+Steps 1 to 4 run against the real Neon API with a real key; nothing here
+hides a host or invents an endpoint. Running them provisions a real project
+on your Neon account, so use a key scoped to a test organization while
+learning. The query in step 5 needs the project to be ready, which `wait()`
+establishes in step 2.
+
+The same bridge exists on Supabase, assembled from official pieces rather
+than invented ones: the creation-time password (via `secrets`), the
+database host (via `raw.databaseHost(projectRef)`), and full branch
+credentials (via `raw.branchConfig(...)`, secrets omitted unless you pass
+`includeSecrets: true`). You assemble Supabase's documented direct
+connection string shape from those parts and hand it to the query adapter.
+A personal access token never acts as a database password, and the SDK
+never fabricates a URL from it.
+
+## Resources and scope
+
+Resource kinds are a shared vocabulary, normalized across providers, with
+honest per-provider limits:
+
+- `project`: the top-level unit on both providers. A Supabase project *is*
+  the PostgreSQL database; a Neon project contains branches that carry
+  databases.
+- `branch`: a Neon branch. Neon branch writes are asynchronous; the result
+  carries the provider operations that `wait()` polls.
+- `database`: a logical PostgreSQL database. Neon-scoped to a branch and
+  addressed by name, exactly as Neon's API does it. Supabase has no such
+  resource: `create({ kind: "database" })` on Supabase is refused with
+  `CAPABILITY` because there is nothing for it to create.
+
+The kind set is open: a provider adapter can declare its own kinds (with
+required scope fields in its capabilities), so a future adapter for a
+non-SQL service plugs in with its own vocabulary instead of fabricated SQL
+semantics.
+
+```ts
+type ResourceRef = {
+  kind: string;
+  id: string;
+  projectId?: string;
+  branchId?: string;
+  scope?: Readonly<Record<string, string>>; // provider-defined kinds
+};
+
+type ManagementListQuery = {
+  cursor?: string;
+  limit?: number;
+  projectId?: string;  // required for scoped list endpoints (Neon branches)
+  branchId?: string;   // required for Neon database lists
+  scope?: Readonly<Record<string, string>>;
+};
+```
+
+Lists are scoped the way the provider addresses them: Neon's branch list
+needs `projectId` on the query, and its database list needs both
+`projectId` and `branchId`. Missing scope fails before dispatch with
+`CONFIGURATION`.
+
+## What each provider supports today
+
+The authoritative source at runtime is the adapter itself:
+
+```ts
+import { createManagement, describeManagementCapabilities } from "dbsdk/management";
+import { neonManagement } from "dbsdk/management/neon";
+
+const adapter = neonManagement({ apiKey: process.env.NEON_API_KEY! });
+const management = createManagement({ adapter });
+
+console.log(describeManagementCapabilities(adapter));
+// {
+//   providerId: "neon",
+//   resourceKinds: ["project", "branch", "database"],
+//   operations: { create: [...], list: [...], get: [...], update: [...], delete: [...] },
+//   pagination: true,
+//   asyncOperations: true,
+//   statusPolling: ["branch"],
+//   prerequisites: { ... },
+//   resourceScopes: {},
+//   evidence: { "create:project": "docs", ... }
+// }
+```
+
+| | Neon (`neonManagement`) | Supabase (`supabaseManagement`) |
+| --- | --- | --- |
+| Create project | yes; `name` required, `region` and `organizationId` optional; no plan and no caller password (Neon generates the role password) | yes; `name` and an organization scope required (`organizationId` or `providerOptions.organization_slug`; the API's `organization_id` is deprecated). A spec `plan` is refused with `CONFIGURATION`: the plan is chosen at the organization level |
+| Branches | yes; `projectId` required, creation is async, a read-write compute is added by default | yes (the Environments API); branch create is synchronous |
+| Databases | yes; `projectId` + `branchId` + `name` + `owner` required; branch-scoped, addressed by name | refused: the project is the database |
+| Update / delete | per kind, all declared kinds | yes for `project` and `branch` |
+| Pagination | projects and branches paginate; the database list does not | no server-side pagination anywhere |
+| Async operations | yes; `wait()` polls the operations endpoint | no operations endpoint; `wait()` polls resource status |
+| Credential | Neon API key | Supabase personal access token (`sbp_...`) |
+
+Availability in this table means "implemented and declared". It never
+certifies your credentials, your plan tier, or that a specific live request
+will succeed; the provider answers for that, with its own errors normalized
+as described below.
+
+One provider-specific nuance worth knowing before you write the create
+spec: Supabase's current API does not accept a `plan` on project creation
+(the plan is chosen at the organization level), and the adapter refuses a
+spec that includes one with a `CONFIGURATION` error telling you to remove
+it. A spec `region` is still accepted and mapped to the official
+`region_selection` form, and the deprecated-but-accepted `organization_id`
+form is supported alongside `providerOptions: { organization_slug }`.
+Region codes come from the provider's own endpoint
+(`GET /v1/projects/available-regions`); the adapter's `prerequisites`
+state the current requirements.
+
+## Create results and secrets
+
+```ts
+type ManagementWriteResult = {
+  resource: ManagementResource | null;
+  operation: ManagementOperation | null;
+  secrets: readonly ManagementSecret[]; // { label, value }
+  indeterminate: boolean;
+};
+```
+
+Secrets surface in exactly one place: `secrets`. On Supabase, the create
+endpoint requires a database password and never echoes it: when you omit
+`password`, the adapter generates a cryptographically random one and
+returns it through `secrets` (label `password`), shown once. If you pass
+your own, it is used but never echoed back. On Neon, connection URIs and
+role passwords from create responses arrive only through `secrets`.
+
+Every raw provider payload is redacted before it reaches your code, and
+credential values are scrubbed from error messages. Treat everything in
+`secrets` like a password: store it, never log it.
+
+## Waiting, bounded
+
+```ts
+type WaitOptions = {
+  signal?: AbortSignal;
+  timeoutMs?: number;    // overall budget, default 300_000
+  pollIntervalMs?: number; // default 2_000
+  onStatus?: (update: ManagementResource | ManagementOperation) => void;
+};
+```
+
+`wait()` issues GET requests only. It polls the provider's operations
+endpoint where one exists (Neon) or the resource's own status where one
+does not (Supabase), and it never resubmits a create, update, or delete.
+Rate-limited polls (429) are retried after the provider's own hint, still
+inside the same overall budget. A budget overrun throws `TIMEOUT`; a
+caller abort throws `ABORTED`. Neither is indeterminate, because waiting
+performs no writes.
+
+One precondition to know: waiting on a bare `ResourceRef` only works for
+kinds whose normalized `status` actually reflects provider lifecycle. Each
+adapter declares which kinds those are (`statusPolling`): Neon's branch
+(the only Neon kind with a status field), and Supabase's project and
+branch. `wait()` on a bare Neon project or database ref is refused before
+dispatch with `CAPABILITY` instead of hanging until the timeout: pass the
+write result or the operation returned by the write, which carries the
+provider operations to poll.
+
+## Errors
+
+`ManagementError` carries a stable `code`: `CAPABILITY`, `CONFIGURATION`,
+`AUTH`, `PERMISSION`, `NOT_FOUND`, `CONFLICT`, `RATE_LIMIT`, `VALIDATION`,
+`ABORTED`, `CONNECTION`, `TIMEOUT`, `PROVIDER`, or `UNKNOWN`, plus the HTTP
+status, the adapter and resource identity, and `retryable`.
+
+The mutation rule matches the query side: if a transport failure or a 5xx
+response happens during a create, update, or delete, the outcome cannot be
+known, so the error is marked `indeterminate: true`. The SDK never retries
+a mutation; you reconcile (for example, by listing or getting the resource
+before deciding what to do). Definitive 4xx rejections are not
+indeterminate.
+
+## Testing without a provider
+
+`dbsdk/management/testing` ships a deterministic fixture adapter. It is
+not a simulator of any provider: it proves what the core client does with
+the results, errors, and capabilities an adapter declares, with every call
+recorded. See [Testing](/docs/testing) and the examples in the repository.

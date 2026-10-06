@@ -144,3 +144,22 @@ before dispatch, `SET LOCAL` allowed, and atomic batches.
 contains the host, port, database, and project reference the adapter parsed
 from your connection string. `pool` is the `pg` pool; as everywhere, using
 `raw` leaves the normalized contract.
+
+## Provisioning and lifecycle (management)
+
+This page covers the query adapter, which connects to a Supabase project
+that already exists. Creating and managing the project itself is the
+management layer's job: with a Supabase personal access token (not the
+database password and not an anon or service_role key),
+`supabaseManagement` from `dbsdk/management/supabase` supports
+create/list/get/update/delete for projects and branches, waits for
+resources to become active, and surfaces the official connection pieces
+(the creation-time password via `secrets`, the database host via
+`raw.databaseHost`, full branch credentials via `raw.branchConfig`). Note
+the provider's live API requirements: create-project needs an organization
+scope, and `plan`/`region` are deprecated fields on that endpoint.
+Supabase has no separate database resource: the project is the database.
+The connection string for this query adapter comes from the Supabase
+dashboard, or from the password returned at creation time plus the
+retrieved database host. See [Management](/docs/management) and
+[Credentials](/docs/credentials).

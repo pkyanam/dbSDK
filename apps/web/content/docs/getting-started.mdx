@@ -1,6 +1,6 @@
 ---
 title: Getting started
-description: Build dbSDK from a local clone, pick an adapter, and run your first parameterized query.
+description: Build dbSDK from a local clone, connect an existing database or provision a new one, and run your first parameterized query.
 sidebar:
   order: 1
 ---
@@ -50,13 +50,30 @@ dependencies, installed only where you use them:
 | `dbsdk/supabase` | `pg` | Supabase Postgres connections |
 | `dbsdk/neon` | `@neondatabase/serverless` | Neon HTTP, WebSocket, and TCP transaction transports |
 
+The management subpaths talk to provider control-plane APIs over HTTPS and
+need no database driver: `dbsdk/management` (core client and types),
+`dbsdk/management/neon`, `dbsdk/management/supabase`, and
+`dbsdk/management/testing`. Details in [Management](/docs/management).
+
 `dbsdk` itself and `dbsdk/testing` pull in no database driver, so bundling
 the core does not bundle a driver you do not use.
 
 ## 2. Pick an adapter and connect
 
-Each adapter wraps the service you already have. You need one connection
-string from that service's dashboard; nothing is provisioned for you.
+There are two ways to get a database to talk to, and both use the same
+query client.
+
+**Bring your own database.** Each query adapter connects to a service you
+already have: you need one `postgresql://` connection string from that
+service's dashboard (or from the management path below), and nothing else
+is required.
+
+**Provision a new one.** With a provider management credential (a Supabase
+personal access token or a Neon API key), the management layer can create
+the project for you, wait until it is ready, and hand back connection
+details. See [Management](/docs/management). The management credential and
+the SQL connection string are different secrets; [Credentials](/docs/credentials)
+explains which goes where.
 
 ```ts
 import { createDatabase } from "dbsdk";
@@ -143,8 +160,11 @@ try {
 
 ## 5. Next steps
 
+- Provision and manage resources: [Management](/docs/management)
+- Which credential goes where: [Credentials](/docs/credentials)
 - What each transport supports: [Capabilities](/docs/capabilities)
 - Writing queries and building reusable statements: [Queries](/docs/queries)
 - Transactions and batches: [Transactions](/docs/transactions)
 - Working without credentials: [Testing](/docs/testing)
+- Connect agents to the docs: [MCP server](/docs/mcp)
 - Runnable programs in the repository: [`examples/`](https://github.com/pkyanam/dbSDK/tree/main/examples)

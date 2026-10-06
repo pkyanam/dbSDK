@@ -9,6 +9,9 @@ Every adapter declares its capabilities, and the client enforces them before
 any network traffic. There is no silent fallback: if a transport cannot do
 something, the call fails with a `DbError` of code `CAPABILITY` and nothing
 is sent. This page states the current matrix and the evidence behind it.
+The same discipline applies to the management layer: every resource kind
+and verb is declared per provider and enforced before dispatch, with its
+own table below.
 
 ## The matrix
 
@@ -107,6 +110,36 @@ Check `db.capabilities` when writing transport-sensitive code instead of
 branching on the adapter id. The adapter id can gain new transports; the
 capability flags are the contract.
 
+## Management capabilities
+
+The management layer uses the same pattern with a richer vocabulary: per
+resource kind (`project`, `branch`, `database`, plus provider-defined
+kinds) and per verb (`create`, `list`, `get`, `update`, `delete`),
+declared by the adapter and enforced before dispatch. The structured
+source at runtime is `describeManagementCapabilities(adapter)` from
+`dbsdk/management`; docs and grids render from it.
+
+| Capability | Neon management | Supabase management |
+| --- | --- | --- |
+| `project` create/list/get | yes | yes |
+| `project` update/delete | yes | yes |
+| `branch` lifecycle | yes; writes are async operations | yes (the Environments API); branch create is synchronous |
+| `database` | yes; branch-scoped, addressed by name | refused (`CAPABILITY`): a Supabase project is the database |
+| Pagination | projects and branches; not the database list | none |
+| Async operations | yes; `wait()` polls the operations endpoint | none; `wait()` polls resource status |
+| Credential | Neon API key | Supabase personal access token (`sbp_...`) |
+
+Evidence for the management facts is `docs`: the behavior comes from the
+providers' official API documentation and the frozen management contract,
+and the adapters map the contract fields onto each provider's current API.
+One concrete example: Supabase's current create-project endpoint takes an
+organization scope and no longer accepts a `plan`, so the SDK refuses a
+spec that includes one (`CONFIGURATION`) and maps a spec `region` to the
+official `region_selection` form.
+Availability means "implemented and declared"; it never certifies
+credentials, plan tier, or a successful live request. Full lifecycle
+detail: [Management](/docs/management).
+
 ## Reproducing the local verification
 
 The test suite runs without any database (fixtures only), and the live local
@@ -124,5 +157,7 @@ DBSDK_TEST_NEON_HTTP_ENDPOINT='http://localhost:14444/sql' \
 pnpm --filter dbsdk test
 ```
 
-The verified state at the time of writing: 182 passed, 0 failed, 0 skipped
-with the live environment running.
+The verified state at the time of writing: 355 passed, 0 failed, 3
+skipped with the live environment running (342 of those pass fully
+offline; the 16 environment-dependent live checks skip without
+credentials).

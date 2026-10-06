@@ -1,8 +1,8 @@
 ---
 title: FAQ
-description: Straight answers about scope, safety, and what dbSDK does not do.
+description: Straight answers about scope, safety, and what dbSDK does and does not do.
 sidebar:
-  order: 13
+  order: 16
 ---
 
 ## Is dbSDK an ORM?
@@ -11,6 +11,32 @@ No. There is no schema, no query builder, no migrations, no model
 definitions. You write SQL; dbSDK handles binding, results, errors,
 transactions, and capability checks. If you want a query builder or an
 ORM, use one; your SQL stays yours.
+
+## Does dbSDK host my database?
+
+No. There is no dbSDK backend, no credential proxy, and no hosted
+anything. On the management side, your provider credential goes from your
+process straight to the provider's official API. On the query side, your
+connection string goes straight to the database. dbSDK is a client library
+and nothing else.
+
+## Is this an admin panel?
+
+No. There is no UI. The management layer gives your code (and your agents)
+a typed verb set over provider resources; the provider's own console
+remains the place to look at accounts, billing, and history. What dbSDK
+adds is normalization, pre-dispatch capability checks, bounded waiting,
+and honest error reporting around those API calls.
+
+## Can I create databases with it?
+
+Yes, where the provider has a management API: with a Neon API key or a
+Supabase personal access token, the management client can create projects
+(and Neon branches and databases), wait until they are ready, and hand
+back connection details for the query client. See
+[Management](/docs/management) and [Credentials](/docs/credentials). The
+PostgreSQL connector is the exception by design: it connects to a server
+you already have, and there is no provider API for it to call.
 
 ## Does my SQL run on any database?
 

@@ -36,6 +36,26 @@ Supabase's root CA supplied via `pool: { ssl: { ca } }` in
 `lib/setup.ts`; `DBSDK_INSECURE_TLS=1` opts out explicitly (encrypted but
 unverified). Localhost needs neither.
 
+## Management examples
+
+The `06` to `08` programs cover the management (control-plane) layer. All
+three run completely offline:
+
+- `npm run management:fixture`: the core contract on the
+  `dbsdk/management/testing` fixture (fictional provider; capability and
+  scope enforcement, bounded waiting).
+- `npm run management:neon`: the real Neon management adapter with an
+  injected `fetch` answering recorded official-API shapes; create project,
+  wait for all operations, secrets, connection URI retrieval with explicit
+  reveal.
+- `npm run management:supabase`: the real Supabase management adapter with
+  an injected `fetch`; organizations, create, status-based waiting, the
+  generated password via `secrets`, the official host, and the current-API
+  `plan` refusal.
+
+None of them touches the network or a hosted provider; each file header
+states exactly what is proven and what is not.
+
 ## Run
 
 ```bash

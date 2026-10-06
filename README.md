@@ -1,38 +1,56 @@
 <div align="center">
 
-<img src="apps/web/public/brand/banner-v2.webp" alt="dbSDK" width="880" />
+<img src="apps/web/public/brand/mark-mono.svg" alt="dbSDK" width="120" />
 
 # dbSDK
 
-**One typed PostgreSQL client for Supabase and Neon.**
+**Create, manage, and query databases with one SDK.**
 
-Parameterized SQL, one result shape, explicit transports, and errors that
-never replay a failed write on their own.
+Bring a provider credential, provision and manage resources, and run
+queries through one typed client. Launch providers: Supabase and Neon.
 
 </div>
 
-dbSDK wraps the database you already have. It does not provision databases,
-translate SQL between engines, or hide how each transport behaves. You write
-PostgreSQL; dbSDK normalizes everything around the query: parameter binding,
-the result envelope, errors, transactions, and capability checks.
+dbSDK has two halves that share one design language.
+
+**Management (the control plane).** Bring your own provider credential (a
+Supabase personal access token or a Neon API key) and get one stable verb
+set over provider resources: `create`, `list`, `get`, `update`, `delete`,
+and `wait`. Provision a project, wait until it is ready, retrieve the
+connection details, and hand them to the query client. There is no central
+dbSDK backend, no credential proxying, and no automatic replay of
+create or delete.
+
+**Queries (the typed PostgreSQL client).** Connect to the database you
+already have, or the one you just provisioned, and write PostgreSQL.
+dbSDK normalizes everything around the query: parameter binding, the
+result envelope, errors, transactions, and capability checks.
 
 - **Parameterized by construction.** Interpolated values become positional
   bind parameters. They can never become identifiers or raw SQL fragments.
-- **One result shape.** Every adapter returns `{ rows, rowCount, command? }`,
+- **One result shape.** Every query adapter returns `{ rows, rowCount, command? }`,
   on TCP, HTTP, and WebSocket transports alike.
-- **Honest capabilities.** Each adapter declares what its transport supports.
-  Unsupported operations fail before dispatch. Nothing falls back silently.
+- **Honest capabilities.** Each adapter declares what it supports, on both
+  planes. Unsupported operations fail before dispatch. Nothing falls back
+  silently.
 - **Writes are never replayed.** If a connection drops after a write was
-  sent, the error is marked `indeterminate`. You decide what to do.
+  sent, the error is marked `indeterminate`. You decide what to do. The
+  same rule governs management mutations.
+- **Secrets stay secrets.** Credentials are options you pass in; secrets
+  the provider returns surface only in explicit `secrets` fields and are
+  redacted from every raw payload and error message.
 
 ## Status
 
 Version 0.1, source-only. **There is no npm package yet**, so nothing here
 will ask you to `npm install dbsdk`. You install from this repository
-(instructions below). The current verification is local: a real Postgres 17
-container, the Neon HTTP protocol through a local proxy, and the Supabase
-adapter against a local server. No hosted Supabase or Neon project has been
-queried by this project, and the docs never claim otherwise.
+(instructions below). The current verification is local and offline: 355
+automated tests pass with no hosted calls (342 pass fully offline; the 16
+environment-dependent live checks skip without credentials). The local
+live checks that do run use a real Postgres 17 container, the Neon HTTP
+protocol through a local proxy, and the Supabase adapter against a local
+server. No hosted Supabase or Neon project has been touched by this
+project, and the docs never claim otherwise.
 
 ## Install from source
 
@@ -58,10 +76,78 @@ npm install ./dbsdk-0.1.0.tgz      # from your app
 ```
 
 The two database drivers are optional peers, installed only where you use
-them: `pg` for the PostgreSQL and Supabase adapters, `@neondatabase/serverless`
-for the Neon adapter.
+them: `pg` for the PostgreSQL and Supabase adapters,
+`@neondatabase/serverless` for the Neon adapter. The management subpaths
+need no driver.
 
-## Quickstart
+## Quickstart: provision, wait, connect, query
+
+The full path on Neon with a real API key (this provisions a real project
+on your account):
+
+```ts
+import { createDatabase } from "dbsdk";
+import { createManagement } from "dbsdk/management";
+import { neon } from "dbsdk/neon";
+import { neonManagement } from "dbsdk/management/neon";
+
+const management = createManagement({
+  adapter: neonManagement({ apiKey: process.env.NEON_API_KEY! }),
+});
+
+const result = await management.create({ kind: "project", name: "my-app" });
+const project = await management.wait(result, { timeoutMs: 120_000 });
+
+// Neon returns connection URIs and role passwords once, via secrets.
+const connectionString =
+  result.secrets.find((s) => s.label === "connectionString")!.value;
+
+const db = createDatabase({
+  adapter: neon({ connectionString, transport: "http" }),
+});
+const { rows } = await db.sql`select version()`;
+await db.close();
+```
+
+On Supabase, the same flow uses a personal access token; the database
+password is generated for you when omitted and returned once through
+`secrets`, and the database host comes from the provider:
+
+```ts
+import { createDatabase } from "dbsdk";
+import { createManagement } from "dbsdk/management";
+import { postgres } from "dbsdk/postgres";
+import { supabaseManagement } from "dbsdk/management/supabase";
+
+const management = createManagement({
+  adapter: supabaseManagement({
+    accessToken: process.env.SUPABASE_ACCESS_TOKEN!, // sbp_...
+  }),
+});
+
+const result = await management.create({
+  kind: "project",
+  name: "my-app",
+  organizationId: process.env.SUPABASE_ORG_ID!,
+});
+const password = result.secrets.find((s) => s.label === "password")!.value;
+const project = await management.wait(result, { timeoutMs: 300_000 });
+const host = await management.raw.databaseHost(project.id);
+
+// Assemble Supabase's documented direct connection string from the two
+// official pieces; the token is never a database credential.
+const db = createDatabase({
+  adapter: postgres({
+    connectionString: `postgresql://postgres:${password}@${host}:5432/postgres`,
+  }),
+});
+```
+
+A management credential never substitutes for a SQL connection string and
+vice versa; see the [credentials guide](https://dbsdk.com/docs/credentials)
+for the exact split.
+
+## Quickstart: query a database you already have
 
 ```ts
 import { createDatabase } from "dbsdk";
@@ -118,7 +204,7 @@ import { sql } from "dbsdk";
 await db.query(sql`select * from ${sql.identifier(tableName)} limit 10`);
 ```
 
-## What each transport supports
+## What the query transports support
 
 | Connection mode | Transport | Parameterized query | Interactive transaction | Atomic batch | Session state |
 | --- | --- | --- | --- | --- | --- |
@@ -141,30 +227,36 @@ evidence levels: [capabilities docs](https://dbsdk.com/docs/capabilities).
 ## What dbSDK will not do
 
 - No silent failover between providers. Switching adapters moves nothing.
-- No automatic retry or replay of writes, ever. `indeterminate` is reported;
-  the decision is yours.
+- No automatic retry or replay of writes or management mutations, ever.
+  `indeterminate` is reported; the decision is yours.
 - No endpoint guessing. Supabase connection modes are explicit and validated
   against the connection string.
 - No SQL translation. The query is yours; the plumbing is ours.
+- No credential interchange. A PAT or API key never becomes a database
+  password; the SDK never fabricates a connection string from a token.
+- No central backend. Your credentials go from your process straight to the
+  provider.
 - No browser sessions. This is a server-side client.
 
 ## Documentation
 
 - Getting started: https://dbsdk.com/docs/getting-started
+- Management (provisioning and lifecycle): https://dbsdk.com/docs/management
+- Credentials guide: https://dbsdk.com/docs/credentials
 - Capabilities: https://dbsdk.com/docs/capabilities
 - Also mirrored at https://database-sdk.dev
 - Every page is available as Markdown to agents and readers (append `.md`),
   plus `llms.txt`, `llms-full.txt`, and an MCP endpoint on the live site.
 - A coding-agent skill lives at [`skills/dbsdk/SKILL.md`](skills/dbsdk/SKILL.md).
-- Runnable examples live in [`examples/`](examples/), including one that
-  needs no database at all (the fixture adapter).
+- Runnable examples live in [`examples/`](examples/), including management
+  flows that need no provider account (the fixture adapters).
 
 ## Repository layout
 
 ```
-packages/dbsdk/     the package: core client, SQL builder, errors, adapters, tests
+packages/dbsdk/     the package: core clients, SQL builder, errors, query and management adapters, tests
 apps/web/           the documentation site (dbsdk.com), with brand assets in apps/web/public/brand
-examples/           runnable TypeScript examples
+examples/           runnable TypeScript examples (query and management)
 skills/             coding-agent skill
 research/           pre-implementation research notes
 ```
@@ -173,6 +265,11 @@ research/           pre-implementation research notes
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). Security reports:
 [SECURITY.md](SECURITY.md). Changelog: [CHANGELOG.md](CHANGELOG.md).
+
+## Supporting dbSDK
+
+dbSDK is open source and free. If it saves you time, you can sponsor the
+project on [GitHub Sponsors](https://github.com/sponsors/pkyanam).
 
 ## License
 

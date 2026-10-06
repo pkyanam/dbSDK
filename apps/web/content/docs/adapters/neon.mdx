@@ -148,3 +148,15 @@ runtimes.
 `{ pool: ... }` for WebSocket. The `sql` object is the driver's own query
 function; using it directly leaves the normalized envelope and error
 handling.
+
+## Provisioning and lifecycle (management)
+
+This page covers the query adapter. The management half of dbSDK can also
+create and manage Neon resources for you: with a Neon API key (not a
+connection string), `neonManagement` from `dbsdk/management/neon` supports
+create/list/get/update/delete and `wait` for projects, branches, and
+branch-scoped databases, retrieves official connection URIs, and
+normalizes Neon's asynchronous operations. See
+[Management](/docs/management) for the full flow and
+[Credentials](/docs/credentials) for the API key versus connection string
+distinction.

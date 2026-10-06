@@ -1,0 +1,73 @@
+---
+title: MCP server
+description: Connect an MCP client to dbSDK's read-only documentation server and search the docs from your editor or agent.
+sidebar:
+  order: 14
+---
+
+This site runs a Model Context Protocol (MCP) server that serves the
+documentation to MCP-compatible clients such as editors and coding agents.
+It is a read-only surface: it exposes pages, search, and navigation, and
+nothing else. It cannot touch databases, provider accounts, or credentials.
+
+## Server endpoint
+
+- URL: `https://dbsdk.com/mcp`
+- Transport: Streamable HTTP
+- Discovery: `https://dbsdk.com/.well-known/mcp.json`
+
+The discovery document lists the server so tools can find it
+automatically:
+
+```json
+{
+  "servers": [
+    {
+      "name": "dbSDK",
+      "transport": "streamable-http",
+      "url": "https://dbsdk.com/mcp"
+    }
+  ]
+}
+```
+
+## What the tools do
+
+| Tool | What it returns |
+| --- | --- |
+| `search_docs` | The most relevant pages for a query, with excerpts. |
+| `get_page` | One page as Markdown, by route. |
+| `list_pages` | Every page with its route, title, and description. |
+| `get_navigation` | The site's navigation structure. |
+
+Every documentation page is also exposed as an MCP resource whose content
+is the page's Markdown, the same text served at `/docs/<route>.md`. All
+four tools are annotated read-only.
+
+## Configuring a client
+
+Add the server URL to any MCP client that supports Streamable HTTP
+servers. The exact field names differ between clients; what they all need
+is the URL `https://dbsdk.com/mcp` and the Streamable HTTP transport. For
+example, a typical remote-server entry looks like:
+
+```json
+{
+  "mcpServers": {
+    "dbsdk": {
+      "url": "https://dbsdk.com/mcp"
+    }
+  }
+}
+```
+
+Many editors also expose the docs header's built-in menu: on every
+documentation page, the "Connect to MCP" dropdown copies the server URL
+or a ready-made configuration for supported clients.
+
+## Related surfaces
+
+The MCP server is one of several agent-facing surfaces. The
+[Readable by agents](/#agents) section of the homepage lists them all:
+`llms.txt`, per-page Markdown (`/index.md` describes the convention), the
+JSON docs API described by `openapi.json`, and this server.
