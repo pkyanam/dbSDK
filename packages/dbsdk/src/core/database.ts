@@ -96,7 +96,12 @@ function validateStatement(statement: unknown, position?: number): asserts state
  * failure during `[{ select ... }, { update ... }]` is still flagged as a
  * potentially-committed write.
  */
-function batchErrorContext(
+/**
+ * Exported for the Drizzle bridge (`src/drizzle-interop`): it has no core client
+ * in its call path, so it reuses this exact batch policy instead of a divergent
+ * copy. The batch as a whole counts as a write if ANY statement is a write.
+ */
+export function batchErrorContext(
   adapterId: string,
   statements: readonly SqlStatement[],
   error: unknown,
@@ -118,7 +123,12 @@ function batchErrorContext(
  * may have applied before the connection died. `indeterminate: true` tells the
  * caller to reconcile; dbSDK never replays the writes itself.
  */
-function transactionErrorContext(
+/**
+ * Exported for the Drizzle bridge (`src/drizzle-interop`): its transaction
+ * implementation reuses this exact policy so bridge transactions classify
+ * identically to core `db.transaction` (see finalizeTransactionError there).
+ */
+export function transactionErrorContext(
   adapterId: string,
   error: unknown,
 ): { adapterId: string; uncertain?: boolean } {

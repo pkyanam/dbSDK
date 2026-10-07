@@ -187,3 +187,98 @@ describe('pg-engine system-errno regressions (round 3): EPIPE is transport, not 
     expect(error).toMatchObject({ code: 'CONSTRAINT', sqlstate: '23505', indeterminate: false });
   });
 });
+
+// ---------------------------------------------------------------------------
+// Release failures are quiet cleanup (round 4 regression — shared pg-engine)
+// ---------------------------------------------------------------------------
+
+describe('pg-engine release failures never mask the primary outcome', () => {
+  it('commit ack lost AND release() throws: primary kept, indeterminate TRUE, native cause EXACT', async () => {
+    const primary = Object.assign(new Error('connection terminated'), { code: 'ECONNRESET' });
+    const { adapter, pools } = engineWith({
+      fail: (text) => (text === 'COMMIT' || text === 'ROLLBACK' ? primary : undefined),
+      failRelease: true,
+    });
+    const db = createDatabase({ adapter });
+    const error = await db
+      .transaction(async (tx) => {
+        await tx.query('insert into t values ($1)', [1]);
+      })
+      .catch((e) => e);
+    // The commit was applied server-side but the reply was lost: the uncertain
+    // classification must survive the failing cleanup. Before the guard the
+    // raw release error replaced it (surfacing as UNKNOWN with no cause).
+    expect(error).toMatchObject({ code: 'CONNECTION', indeterminate: true, retryable: true });
+    expect((error as { cause?: Error }).cause).toBe(primary);
+    expect((error as Error).message).not.toContain('release()');
+    // The release was attempted exactly once and never retried/double-called.
+    expect(pools[0]!.releasedCount).toBe(1);
+    expect(pools[0]!.clients[0]!.released).toBe(true);
+    // No write replay.
+    expect(pools[0]!.clientQueries(1).filter((q) => q.text.startsWith('insert'))).toHaveLength(1);
+  });
+
+  it('constraint failure with confirmed rollback AND release() throws: proven rejection preserved', async () => {
+    const primary = Object.assign(new Error('null value in column violates not-null'), { code: '23502' });
+    const { adapter, pools } = engineWith({
+      fail: (text) => (text.startsWith('insert') ? primary : undefined),
+      failRelease: true,
+    });
+    const db = createDatabase({ adapter });
+    const error = await db
+      .transaction(async (tx) => {
+        await tx.query('insert into t values ($1)', [1]);
+      })
+      .catch((e) => e);
+    expect(error).toMatchObject({ code: 'CONSTRAINT', sqlstate: '23502', indeterminate: false });
+    expect((error as { cause?: Error }).cause).toBe(primary);
+    expect(pools[0]!.releasedCount).toBe(1);
+  });
+
+  it('BEGIN failure AND release() throws: primary preserved, release still attempted once', async () => {
+    const primary = Object.assign(new Error('terminating connection due to administrator command'), {
+      code: '57P01',
+    });
+    const { adapter, pools } = engineWith({
+      fail: (text) => (text === 'BEGIN' ? primary : undefined),
+      failRelease: true,
+    });
+    const db = createDatabase({ adapter });
+    const error = await db.transaction(async () => 'never').catch((e) => e);
+    // Nothing ran, so the outcome is proven; the release failure must not
+    // overwrite the SQLSTATE.
+    expect(error).toMatchObject({ code: 'CONNECTION', sqlstate: '57P01', indeterminate: false });
+    expect((error as { cause?: Error }).cause).toBe(primary);
+    expect(pools[0]!.releasedCount).toBe(1);
+  });
+
+  it('acknowledged commit AND release() throws: the committed result is returned (quiet cleanup policy)', async () => {
+    const { adapter, pools } = engineWith({ failRelease: true });
+    const db = createDatabase({ adapter });
+    // The COMMIT was acknowledged, so the transaction succeeded; the release
+    // failure is pool-side cleanup and must not deny a proven success.
+    const result = await db.transaction(async (tx) => {
+      await tx.query('insert into t values ($1)', [1]);
+      return 'committed';
+    });
+    expect(result).toBe('committed');
+    expect(pools[0]!.releasedCount).toBe(1);
+  });
+
+  it('batch constraint failure AND release() throws: proven rejection preserved (batch cleanup)', async () => {
+    const primary = Object.assign(new Error('null value in column violates not-null'), { code: '23502' });
+    const { adapter, pools } = engineWith({
+      fail: (text) => (text.startsWith('insert') ? primary : undefined),
+      failRelease: true,
+    });
+    const db = createDatabase({ adapter });
+    const error = await db
+      .batch([{ text: 'insert into t values ($1)', params: [1] }])
+      .catch((e) => e);
+    // Before the guard the raw release error replaced this and it surfaced as
+    // UNKNOWN with indeterminate: true — a false uncertainty claim.
+    expect(error).toMatchObject({ code: 'CONSTRAINT', sqlstate: '23502', indeterminate: false });
+    expect((error as { cause?: Error }).cause).toBe(primary);
+    expect(pools[0]!.releasedCount).toBe(1);
+  });
+});

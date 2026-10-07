@@ -54,10 +54,10 @@ Design constraints carried from accepted reviews:
    sessionState, transaction/batch support) gates every verb; non-SQL providers get their own
    surface or no surface — never a fake SQL-parity promise.
 4. **Error semantics:** one error model (cause chaining, `indeterminate` for unobservable
-   writes, no-retry classes). Today's Drizzle-bridge boundary (native Drizzle errors pass
-   through) is a documented first bridge boundary, not the ultimate contract; a guard/error
-   seam inside the engine is proposed as a coordinated additive change (ledger F24), not a
-   rewrite of accepted APIs.
+   writes, no automatic write replay). The PostgreSQL and Neon HTTP bridges now normalize
+   supported execution failures through dbSDK's shared policy and preserve the native cause.
+   Raw client access, deliberate transaction rollback, and query-construction errors remain
+   documented escape boundaries. Extending this contract to future engines remains a proposal.
 5. **Provider selection:** simple discriminated config (provider id + credentials + adapter
    options) initially; no hidden global state.
 

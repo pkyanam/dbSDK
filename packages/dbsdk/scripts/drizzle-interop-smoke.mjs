@@ -18,9 +18,11 @@
  *    insert columns; the emitted .d.ts preserves Drizzle generics. With ALL
  *    optional peers installed, every reported error lives inside drizzle-orm's
  *    own published d.ts (upstream; reproduces in a bare drizzle consumer).
- *    A consumer that omits @neondatabase/serverless legitimately sees 2
- *    unresolved-optional-peer-type errors in dbsdk's own d.ts (verified as
- *    consumer C below) — no zero-strict-errors claim is made;
+ *    A consumer that omits @neondatabase/serverless sees the SAME
+ *    upstream-only error set and ZERO errors in dbsdk's own d.ts (the shared
+ *    entry's declarations never name that peer; verified as consumer C below
+ *    and compared against consumer B's baseline) — no zero-strict-errors
+ *    claim is made about skipLibCheck:false in general;
  * 3. runtime behavior: offline refusals (non-Database input, DSN/connection/
  *    client config, sessionState:false transaction pooler refused BEFORE pool
  *    creation) and, when a server is available, real schema queries, joins,
@@ -335,6 +337,9 @@ console.log('   ok: values are bound, never interpolated');
 
 await db.close();
 const failure: unknown = await drizzleDb.select().from(users).catch((e) => e);
+// R2: failures through the bridge are normalized DbErrors; the native pool
+// error stays on cause (previously the top-level was Drizzle's raw wrapper).
+assert.equal((failure as { name?: string }).name, 'DbError');
 assert.match(String((failure as Error)?.cause ?? failure), /Cannot use a pool after calling end/i);
 console.log('   ok: after close() the Drizzle instance fails; no pool recreation');
 } finally {
@@ -373,8 +378,9 @@ console.log('   ok: after close() the Drizzle instance fails; no pool recreation
   // meaningful boundary asserted here is: ZERO errors from our packed API
   // (node_modules/dbsdk) or from consumer code — every reported error must
   // live inside node_modules/drizzle-orm. A consumer that omits
-  // @neondatabase/serverless sees 2 unresolved-optional-peer-type errors in
-  // dbsdk's own d.ts; that configuration is verified separately as consumer C.
+  // @neondatabase/serverless sees exactly the same upstream-only error set
+  // (the shared entry's declarations never name that peer); that configuration
+  // is verified separately as consumer C and compared against this baseline.
   // NO claim is made that skipLibCheck:false is error-free in general.
   const tscStrict = spawnSync('npx', ['tsc', '-p', '.'], { cwd: consumerB, encoding: 'utf8' });
   const strictOutput = (tscStrict.stdout + tscStrict.stderr).trim();
@@ -385,6 +391,13 @@ console.log('   ok: after close() the Drizzle instance fails; no pool recreation
   if (outsideDrizzle.length > 0) {
     fail(`skipLibCheck:false reported errors outside node_modules/drizzle-orm:\n${outsideDrizzle.join('\n')}`);
   }
+  // Compare diagnostic locations and codes, rather than prose: TypeScript
+  // may print equivalent union members in a different order between graphs.
+  const upstreamLocations = (lines) => [...new Set(lines
+    .filter((line) => line.startsWith('node_modules/drizzle-orm/'))
+    .map((line) => line.match(/^(.*\(\d+,\d+\)): error (TS\d+):/).slice(1).join(':')))]
+    .sort();
+  const drizzleBaseline = upstreamLocations(errorLines);
   ok(
     `skipLibCheck:false (all optional peers installed): 0 errors from the packed ` +
       `dbsdk API or consumer code (${errorLines.length} reported inside drizzle-orm's ` +
@@ -462,6 +475,8 @@ console.log('   ok: after close() the Drizzle instance fails; no pool recreation
           lib: ['ES2023', 'ESNext.Disposable'],
           module: 'NodeNext',
           moduleResolution: 'NodeNext',
+          exactOptionalPropertyTypes: true,
+          noUncheckedIndexedAccess: true,
           skipLibCheck: false,
           noEmit: true,
           types: ['node'],
@@ -474,16 +489,19 @@ console.log('   ok: after close() the Drizzle instance fails; no pool recreation
   );
   writeFileSync(
     path.join(consumerC, 'types.ts'),
-    "import { drizzlePostgres } from 'dbsdk/drizzle';\nexport const check = drizzlePostgres;\n",
+    // Use the same PostgreSQL schema-authoring fixture as consumer B so
+    // importing pg-core exposes the same upstream policy declarations.
+    // Keep the positive and negative generic checks without the Neon peer.
+    readFileSync(path.join(consumerB, 'types.ts'), 'utf8'),
   );
-  // Documented boundary (drizzle acceptance F2): with the neon peer absent — a
-  // legitimate configuration when only using dbsdk/postgres + dbsdk/drizzle —
-  // skipLibCheck:false reports unresolved-optional-peer-type errors in dbsdk's
-  // OWN d.ts (the packed files import @neondatabase/serverless types), exactly
-  // like upstream drizzle entries do for their optional peers. This check pins
-  // the boundary: such errors may appear ONLY inside node_modules/dbsdk (the
-  // known 2, in dist/adapters/neon.d.ts and dist/drizzle-interop/index.d.ts),
-  // and none may appear in consumer code.
+  // Documented boundary (post combined type unit): the shared `dbsdk/drizzle`
+  // entry's declarations never name `@neondatabase/serverless`, so with the
+  // neon peer absent — a legitimate configuration when only using
+  // dbsdk/postgres + dbsdk/drizzle — skipLibCheck:false reports ZERO errors in
+  // dbsdk's own packed d.ts, and the remaining error set must be IDENTICAL to
+  // the all-peers baseline consumer B established (all inside
+  // node_modules/drizzle-orm, same location set as the all-peers consumer).
+  // None may appear in consumer code.
   const tscC = spawnSync('npx', ['tsc', '-p', '.'], { cwd: consumerC, encoding: 'utf8' });
   const cOutput = (tscC.stdout + tscC.stderr).trim();
   const cErrorLines = cOutput.split('\n').filter((line) => /^\S+\.d\.ts\(|^\S+\.ts\(/.test(line));
@@ -497,22 +515,29 @@ console.log('   ok: after close() the Drizzle instance fails; no pool recreation
     );
   }
   const dbsdkErrors = cErrorLines.filter((line) => line.startsWith('node_modules/dbsdk/'));
-  if (dbsdkErrors.length === 0) {
+  if (dbsdkErrors.length !== 0) {
     fail(
-      'consumer C reported no dbsdk d.ts errors; the documented 2-error ' +
-        'unresolved-@neondatabase/serverless boundary did not reproduce — re-verify the docs wording',
+      `consumer C reported ${dbsdkErrors.length} dbsdk d.ts errors; the shared entry ` +
+        'is peer-free, so a no-neon consumer must see 0 dbsdk errors. Actual:\n' +
+        dbsdkErrors.join('\n'),
     );
   }
-  if (dbsdkErrors.length !== 2) {
+  const cDrizzleSet = upstreamLocations(cErrorLines);
+  const baselineOnly = drizzleBaseline.filter((line) => !cDrizzleSet.includes(line));
+  const consumerOnly = cDrizzleSet.filter((line) => !drizzleBaseline.includes(line));
+  if (baselineOnly.length > 0 || consumerOnly.length > 0) {
     fail(
-      `consumer C reported ${dbsdkErrors.length} dbsdk d.ts errors; docs state 2. ` +
-        `Actual:\n${dbsdkErrors.join('\n')}`,
+      `consumer C's upstream error set differs from the all-peers baseline ` +
+        `(baseline-only: ${baselineOnly.length}, consumer-C-only: ${consumerOnly.length}).\n` +
+        `baseline-only:\n${baselineOnly.slice(0, 5).join('\n')}\n` +
+        `consumer-C-only:\n${consumerOnly.slice(0, 5).join('\n')}`,
     );
   }
   ok(
-    `consumer C (no neon peer): skipLibCheck:false reports exactly ${dbsdkErrors.length} ` +
-      'unresolved-optional-peer-type errors in dbsdk\'s own packed d.ts (documented), ' +
-      `${cErrorLines.length - dbsdkErrors.length} inside drizzle-orm's own d.ts, 0 in consumer code`,
+    'consumer C (no neon peer): skipLibCheck:false reports 0 errors in dbsdk\'s ' +
+      `own packed d.ts and an upstream error set identical to the all-peers ` +
+      `baseline (${cDrizzleSet.length} distinct locations inside drizzle-orm's own d.ts), ` +
+      '0 in consumer code',
   );
 
   step('smoke complete');

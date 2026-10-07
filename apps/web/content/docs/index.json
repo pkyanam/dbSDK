@@ -4,7 +4,7 @@
   "source": "apps/web/content/docs/",
   "product": {
     "name": "dbSDK",
-    "tagline": "Create, manage, and query databases with one SDK",
+    "tagline": "Create, manage, and query databases with one TypeScript SDK",
     "package": "dbsdk",
     "npmPublished": false,
     "repository": "https://github.com/pkyanam/dbSDK",

@@ -127,13 +127,17 @@ async function rollbackQuietly(client: PgClientLike): Promise<boolean> {
 
 /**
  * Run an interactive transaction on a single leased client: BEGIN, the callback,
- * COMMIT — or ROLLBACK on any failure, with `release()` always running.
+ * COMMIT — or ROLLBACK on any failure, with `release()` always attempted.
  * Shared by the pg engine and adapters that lease clients from other pools.
  *
  * If the transaction had begun and could not be proven rolled back or committed
  * (e.g. the connection dropped before COMMIT/ROLLBACK finished), the thrown error
  * is marked with an uncertain outcome — the core client turns that into
  * `DbError.indeterminate: true`. There is no replay of writes anywhere.
+ *
+ * A `release()` failure is cleanup, not an outcome: it is swallowed so it can
+ * never mask the primary error, replace a proven rejection with an uncertain
+ * outcome, or turn an acknowledged commit into a failure.
  */
 export async function runLeasedTransaction<T>(
   client: PgClientLike,
@@ -164,7 +168,14 @@ export async function runLeasedTransaction<T>(
     }
     throw error;
   } finally {
-    client.release();
+    // A release failure is pool-side cleanup, not a transaction outcome: it
+    // must never mask the primary error (nor an acknowledged success), and it
+    // must not replace a proven rejection with an uncertain outcome.
+    try {
+      client.release();
+    } catch {
+      /* ignored — the primary error (or successful result) already won */
+    }
   }
 }
 
@@ -260,7 +271,13 @@ export function createPgEngine(options: PgEngineOptions): DatabaseAdapter<PgPool
         }
         throw error;
       } finally {
-        client.release();
+        // Same discipline as `runLeasedTransaction`: a release failure is
+        // pool-side cleanup and must never mask the batch's primary error.
+        try {
+          client.release();
+        } catch {
+          /* ignored — the primary error (or successful result) already won */
+        }
       }
     },
 

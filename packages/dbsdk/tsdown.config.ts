@@ -28,6 +28,16 @@ if (existsSync('src/sync/index.ts')) entry.push('src/sync/index.ts');
 if (existsSync('src/drizzle-interop/index.ts')) entry.push('src/drizzle-interop/index.ts');
 
 /**
+ * Driver-typed declaration entry for the Neon HTTP bridge
+ * (dbsdk/drizzle/neon-http). This is a TYPE-ONLY entry: a single authored
+ * declaration file over the same runtime module as `dbsdk/drizzle`. tsdown
+ * bundles it like any dts entry (inlining internal types, keeping the peer
+ * imports external) and emits only `neon-http.d.ts` — no JS is generated,
+ * so the runtime remains exactly the shared `index.js`.
+ */
+if (existsSync('src/drizzle-interop/neon-http.d.ts')) entry.push('src/drizzle-interop/neon-http.d.ts');
+
+/**
  * ORM authoring facade entry (dbsdk/orm): static re-export surface of the
  * drizzle-orm optional peer (root + pg-core). Unlike the drizzle entry, this
  * module is intentionally NOT lazy — it is a type/authoring surface whose

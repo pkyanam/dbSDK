@@ -53,8 +53,18 @@ does not yet publish to npm; versions below describe the source tree.
   schema queries, joins, relational queries, transactions on the same pool,
   with lifetime, TLS posture, and pooler guards preserved). Refusals fire
   before any pool creation or raw access; the missing-peer error is
-  actionable and DSN-free. Native Drizzle/driver errors surface as-is (no
-  unified-error claim); no Studio/Kit/seed/migrations claims.
+  actionable and DSN-free. Failures on the bridge's supported execution
+  paths surface as normalized `DbError`s (same `code` / `sqlstate` /
+  `retryable` / `indeterminate` semantics as `db.sql` / `db.query` /
+  `db.transaction`, native driver error preserved on `cause`, Drizzle's
+  params-echoing wrapper unwrapped, no retries or replays); raw boundaries
+  stay raw: `$client` / `db.raw`, Drizzle's deliberate abort
+  (`tx.rollback()`), and construction-time builder throws. The shared
+  entry's declarations never name the Neon peer (explicit-schema calls keep
+  the full official `$client` surface through a peer-free structural
+  mirror), and the type-only `dbsdk/drizzle/neon-http` subpath serves code
+  that names the driver's nominal types. No Studio/Kit/seed/migrations
+  claims.
 - Documentation: new Management, Credentials, and MCP server pages; the
   homepage compatibility table, agent links, and a Sponsors section;
   `.github/FUNDING.yml`. Added since: the Sync page, the Drizzle interop

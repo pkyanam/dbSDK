@@ -410,7 +410,11 @@ d('R3 — real local PostgreSQL: value conversions and options (gated)', () => {
   it('close() ends the SDK pool exactly once; use afterwards fails and nothing is recreated', async () => {
     await db.close();
     closedByCloseTest = true;
+    // R2: the use failure is a normalized DbError whose cause is the pool's
+    // own "Cannot use a pool after calling end" error (previously the
+    // top-level was Drizzle's raw DrizzleQueryError wrapper).
     const failure = await drizzleDb.select().from(events).catch((e) => e);
+    expect(failure).toBeInstanceOf(DbError);
     expect(String((failure as Error)?.cause ?? failure)).toMatch(/Cannot use a pool after calling end/i);
     // A new factory call on the closed database refuses before touching raw.
     const error = configErrorOf(await drizzlePostgres(db).catch((e) => e));

@@ -23,6 +23,8 @@ export type FakeBehavior = {
   rows?: (text: string, values?: unknown[]) => Partial<PgQueryOutput> | undefined;
   /** Return an error to throw for matching SQL, or `undefined` to succeed. */
   fail?: (text: string, values?: unknown[]) => Error | undefined;
+  /** When true, the client's `release()` throws after recording the attempt. */
+  failRelease?: boolean;
 };
 
 const DEFAULT_RESULT: PgQueryOutput = { rows: [], rowCount: 0, command: 'EXECUTE' };
@@ -48,8 +50,13 @@ export class FakeClient implements PgClientLike {
   }
 
   release(): void {
+    // The attempt is always recorded first, mirroring pg-pool's
+    // throwOnDoubleRelease (state updated, then it throws).
     this.released = true;
     this.pool.releasedCount += 1;
+    if (this.behavior?.failRelease) {
+      throw new Error('release() failed (simulated pool-side cleanup failure)');
+    }
   }
 }
 

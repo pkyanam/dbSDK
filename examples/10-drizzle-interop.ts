@@ -8,9 +8,11 @@
  * The bridge hands Drizzle's stable node-postgres / neon-http drivers a
  * validated, dbSDK-OWNED driver handle. You keep the lifecycle: `db.close()`
  * ends the pool, and a previously returned Drizzle instance fails afterwards —
- * no pool is ever recreated. Drizzle executions surface native Drizzle/driver
- * errors, NOT dbSDK-normalized DbError; only the bridge's pre-execution
- * validation uses dbSDK error conventions.
+ * no pool is ever recreated. Drizzle executions are normalized into
+ * dbSDK's `DbError` (same classification and indeterminate-write semantics as
+ * `db.sql`, native driver error preserved on `cause`); raw errors remain only
+ * on the escape hatches (`drizzleDb.$client`, `db.raw`) and for Drizzle's
+ * deliberate-abort signal (`tx.rollback()` → Drizzle `TransactionRollbackError`).
  *
  * Refused before any pool creation or dispatch:
  * - a sessionState:false transaction pooler (e.g. Supabase transaction mode) —

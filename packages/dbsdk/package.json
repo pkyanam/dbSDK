@@ -1,7 +1,7 @@
 {
   "name": "dbsdk",
   "version": "0.1.0",
-  "description": "One typed SDK to create, manage, and query databases on Supabase, Neon, and PlanetScale Postgres: bring your provider API key, provision and manage resources through the management control plane, run parameterized SQL, and use Drizzle ORM over dbSDK connections. Honest capabilities, normalized errors, no silent failover.",
+  "description": "One typed TypeScript SDK to create, manage, and query databases: bring your own provider credentials, provision and manage resources through the management control plane, run parameterized SQL, and use Drizzle ORM over dbSDK connections. Honest capabilities, normalized errors, no silent failover.",
   "type": "module",
   "license": "Apache-2.0",
   "engines": {
@@ -64,6 +64,11 @@
     },
     "./drizzle": {
       "types": "./dist/drizzle-interop/index.d.ts",
+      "import": "./dist/drizzle-interop/index.js",
+      "default": "./dist/drizzle-interop/index.js"
+    },
+    "./drizzle/neon-http": {
+      "types": "./dist/drizzle-interop/neon-http.d.ts",
       "import": "./dist/drizzle-interop/index.js",
       "default": "./dist/drizzle-interop/index.js"
     },

@@ -78,6 +78,17 @@ What dbSDK does about it: nothing automatic. No retry, no replay, no
 failover. See [Transactions](/docs/transactions) for how to make retries
 safe with idempotent writes.
 
+The same rules apply to queries, transactions, and batches executed through
+the [Drizzle bridge](/docs/drizzle): a failed Drizzle query rejects with a
+`DbError` carrying exactly this classification, with the native driver error
+on `cause`. Three boundaries remain outside the normalization: calls made
+directly through `drizzleDb.$client` or `db.raw` (raw handles bypass every
+normalization layer), Drizzle's deliberate-abort signal, `tx.rollback()`,
+which still rejects with Drizzle's `TransactionRollbackError`, and misuse
+that throws while *constructing* a query object — before the Drizzle
+instance is ever called, e.g. `.values([])` while evaluating a batch array —
+which raises Drizzle's own error synchronously, outside the bridge.
+
 ## Errors that are not from the database
 
 Your own exceptions are normalized too. If ordinary code inside

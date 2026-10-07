@@ -112,6 +112,14 @@ The standard fix is idempotency: client-generated primary keys plus
 `insert ... on conflict do nothing` (or `do update`), so a safe retry is a
 property of your schema instead of a promise from the driver.
 
+The same transaction and marking semantics apply to Drizzle transactions
+run over dbSDK connections (`drizzleDb.transaction(...)` from the
+[Drizzle bridge](/docs/drizzle)): a `commit` that may have been applied
+before the connection dropped is marked `indeterminate: true`, a failed
+`ROLLBACK` never replaces the original error, and the outcome is
+never auto-retried. Only the deliberate `tx.rollback()` abort keeps
+Drizzle's own `TransactionRollbackError` signal.
+
 ## What gets marked
 
 The rule is a conservative heuristic, not a purity proof:

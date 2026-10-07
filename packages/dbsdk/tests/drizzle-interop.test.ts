@@ -216,9 +216,11 @@ describe('drizzlePostgres — refusals before dispatch', () => {
     await db.close();
 
     // The previously returned Drizzle instance holds the ended pool: use fails
-    // (drizzle wraps the driver failure as "Failed query: ..."; the cause is
-    // the pool's "Cannot use a pool after calling end" error).
+    // with a normalized DbError (R2: the bridge no longer surfaces raw
+    // Drizzle/driver errors) whose cause is the pool's "Cannot use a pool
+    // after calling end" error.
     const failure = await drizzleDb.execute('select 1').catch((e) => e);
+    expect(failure).toBeInstanceOf(DbError);
     expect(String((failure as Error)?.cause ?? failure)).toMatch(/Cannot use a pool after calling end/i);
     expect(pools).toHaveLength(1); // no pool recreation
 
@@ -635,9 +637,11 @@ d('drizzlePostgres — real local PostgreSQL', () => {
     await db.close();
     closedByCloseTest = true;
     expect(poolsCreated).toBe(1);
-    // Drizzle wraps the driver failure ("Failed query: ..."); its cause is the
-    // pool's own "Cannot use a pool after calling end" error.
+    // R2: use fails with a normalized DbError whose cause is the pool's own
+    // "Cannot use a pool after calling end" error (previously this surfaced as
+    // Drizzle's raw DrizzleQueryError wrapper).
     const failure = await drizzleDb.select().from(users).catch((e) => e);
+    expect(failure).toBeInstanceOf(DbError);
     expect(String((failure as Error)?.cause ?? failure)).toMatch(/Cannot use a pool after calling end/i);
     expect(poolsCreated).toBe(1);
   });

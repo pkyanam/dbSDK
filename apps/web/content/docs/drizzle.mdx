@@ -15,10 +15,10 @@ Its companion entry `dbsdk/orm` is the SDK-owned **schema authoring surface**
 for the same stable drizzle-orm copy: one import for tables, columns,
 relations, operators, and `sql` (see [Schema authoring with `dbsdk/orm`](#schema-authoring-with-dbsdkorm)).
 
-dbSDK does not fork or wrap Drizzle. Schemas and builders are imported from
+dbSDK uses Drizzle's unmodified published package. Schemas and builders are imported from
 `dbsdk/orm` (a pure re-export) or from `drizzle-orm` directly — both resolve
-to the same stable 0.45.3 API; the bridge only supplies the connection and
-refuses anything that would bypass it. There is no claim of full Drizzle
+to the same stable 0.45.3 API; the bridge supplies the connection, checks its
+capabilities, and normalizes supported execution failures. There is no claim of full Drizzle
 parity here — Studio, Kit, seed, and validators are separate tools with their
 own licenses.
 
@@ -39,11 +39,34 @@ A note for `skipLibCheck: false` users: drizzle-orm 0.45.3's own published
 type declarations do not fully typecheck under strict NodeNext even in a bare
 drizzle consumer (~72 upstream errors, with or without dbsdk). With **all
 optional peers you use installed**, dbsdk's packed declarations contribute
-zero errors. If you omit `@neondatabase/serverless` (legitimate when you only
-use `dbsdk/postgres` + `dbsdk/drizzle`), `skipLibCheck: false` reports 2
-unresolved-optional-peer-type errors in dbsdk's own `.d.ts` — the same pattern
-as upstream drizzle entries for their optional peers. `skipLibCheck: true` (the
-setting used for every other dbSDK entry) avoids all of this.
+zero errors. Omitting `@neondatabase/serverless` (legitimate when you only
+use `dbsdk/postgres` + `dbsdk/drizzle`) changes nothing: the shared entry's
+declarations never name that peer, so `skipLibCheck: false` reports the same
+upstream-only error set and zero errors from dbsdk. The peer is required only
+where it is actually used — `dbsdk/neon` and the `dbsdk/drizzle/neon-http`
+type entry below. `skipLibCheck: true` (the setting used for every other
+dbSDK entry) avoids all of this.
+
+### Importing the driver-typed entry: `dbsdk/drizzle/neon-http`
+
+If you need to *name* Drizzle's nominal `NeonHttpDatabase` class or the
+driver's `NeonQueryFunction` type directly (for example, legacy utilities
+typed against those classes), import the same runtime function from the
+dedicated type entry:
+
+```ts
+import { drizzleNeonHttp } from "dbsdk/drizzle/neon-http";
+```
+
+The subpath executes the identical module as `dbsdk/drizzle` — same function
+object, no duplicated code, no behavioral difference. Only its declarations
+differ: this entry uses the driver's own types, so it requires the
+`@neondatabase/serverless` peer to be installed (the same requirement
+`dbsdk/neon` has always had), and it returns the nominal
+`NeonHttpDatabase<TSchema> & { $client: NeonQueryFunction<false, true> }`.
+The shared `dbsdk/drizzle` entry returns the structural equivalent — every
+query surface is type-identical, but a value produced there cannot be
+assigned *to* a nominal `NeonHttpDatabase` slot.
 
 ## The shape
 
@@ -75,8 +98,44 @@ is preserved exactly.
 
 - `drizzlePostgres(db, config?)` → Drizzle's `NodePgDatabase<TSchema>` with
   `$client` set to the dbSDK-owned pool.
-- `drizzleNeonHttp(db, config?)` → Drizzle's `NeonHttpDatabase<TSchema>` with
-  `$client` set to the dbSDK-owned neon query function.
+- `drizzleNeonHttp(db, config?)` → a Drizzle-shaped database with `$client`
+  set to the dbSDK-owned neon query function. The query/result/RQB types are
+  identical to Drizzle's `NeonHttpDatabase<TSchema>` (proven by type tests);
+  the value is described through peer-free structural contracts so that
+  PostgreSQL-only consumers can typecheck `dbsdk/drizzle` without the Neon
+  peer. Call it with inferred generics (`drizzleNeonHttp(db, { schema })`) or
+  an explicit schema argument (`drizzleNeonHttp<MySchema>(db, …)`) — both keep
+  the full official `$client` surface (tagged-template calls, `.query()` with
+  per-call options and array/full-result modes, `.unsafe()`, `.transaction()`
+  as typed by the driver, inspectable query-promise metadata). To assign a
+  result to Drizzle's nominal `NeonHttpDatabase` class, or to name
+  `NeonQueryFunction` directly, import the same function from
+  `dbsdk/drizzle/neon-http` (requires the `@neondatabase/serverless` peer).
+
+### Typing details for `drizzleNeonHttp` (optional reading)
+
+TypeScript does not infer a defaulted type parameter when a caller supplies a
+partial type-argument list, so the shared entry gives `drizzleNeonHttp` two
+overloads:
+
+- **First overload** (the one you normally hit): the raw-handle parameter
+  defaults to `NeonHttpNativeRawContract` — a peer-free, member-for-member
+  mirror of the official `neon()` client as dbSDK constructs it. An
+  explicit-schema call keeps the full official `$client` surface, and the
+  mirror is bidirectionally assignable to the driver's
+  `NeonQueryFunction<false, true>`.
+- **Second overload**: for raw handles that are not assignable to the native
+  shape (custom `sql` types). Its default is the permissive
+  `NeonRawContract`, and `$client` is typed as the raw's own `sql` — a custom
+  `sql` is never claimed to have the official client's full surface. Pass the
+  raw type as the second type argument (`drizzleNeonHttp<MySchema, MyRaw>(db)`)
+  or omit the schema argument to use it.
+
+Every query surface (select/joins/insert-returning/update-returning/
+delete-returning/`$count`/`execute`/RQB/`batch`) is type-identical to the
+driver-typed path; the only thing the shared entry does not provide is the
+driver's nominal class identity (see the `dbsdk/drizzle/neon-http` entry
+below).
 
 ## Schema authoring with `dbsdk/orm`
 
@@ -197,11 +256,29 @@ error message ever contains your connection string.
 
 ## What the bridge does not change (honest boundaries)
 
-- **Errors.** Only the bridge's pre-execution validation uses dbSDK error
-  conventions (`DbError`, code `CONFIGURATION`). Queries, transactions, and
-  batches executed *through the returned Drizzle instance* surface native
-  Drizzle/driver errors — they are not normalized into `DbError`, and dbSDK's
-  indeterminate-write semantics do not extend to Drizzle's executor.
+- **Errors are normalized, with two raw boundaries.** Every query, transaction,
+  and batch failure *through the returned Drizzle instance* is a `DbError` —
+  the same classification as `db.sql` / `db.query` / `db.transaction`:
+  `code` (e.g. `CONSTRAINT` for a unique violation), `sqlstate`,
+  `retryable`, and `indeterminate: true` when a write may or may not have
+  committed (transport failure during a write, commit acknowledgement lost).
+  The native driver error is preserved on `cause`. Drizzle's own
+  `DrizzleQueryError` wrapper ("Failed query: ...\nparams: ...") is unwrapped
+  at the bridge, so parameter values never leak into error messages. dbSDK
+  never retries or replays a write, on this path or any other. What stays
+  raw: (1) the escape hatches — `drizzleDb.$client` (the dbSDK-owned pool or
+  neon function) and `db.raw` behave exactly as before, so calls made directly
+  through them bypass normalization, like every raw handle; (2) errors thrown
+  by Drizzle itself at execution time — query building during the driver call
+  (e.g. an unfilled placeholder) or result mapping (a schema/data mismatch) —
+  are surfaced as `DbError` code `UNKNOWN` with no write-outcome claim, while
+  misuse that throws while *constructing* a query object, before the Drizzle
+  instance is ever called (e.g. `.values([])` while evaluating a batch array),
+  raises Drizzle's own error synchronously, outside the bridge; and (3)
+  Drizzle's deliberate-abort signal: calling `tx.rollback()` still rejects
+  with Drizzle's `TransactionRollbackError`. `drizzleDb.transaction(...)`
+  rejects like `db.transaction` does (see [Errors](/docs/errors) and
+  [Transactions](/docs/transactions)).
 - **Lifetime.** `db.close()` ends the pool. A previously returned Drizzle
   instance then fails on use (the pool was ended) and is never recreated. For
   Neon HTTP there is no pool to end, so a previously returned instance keeps
@@ -211,8 +288,9 @@ error message ever contains your connection string.
   dbSDK's own executor, not to Drizzle's. Over Neon HTTP there are no
   prepared statements at all.
 - **Neon HTTP limits** are the driver's, unchanged: no interactive
-  transactions (`db.transaction` on the Drizzle instance throws), no session
-  state, no automatic WebSocket fallback, no retry. Use dbSDK's `db.batch` for
+  transactions (calling `db.transaction` on the Drizzle instance rejects with
+  a `DbError` code `CAPABILITY` before anything is sent), no session state, no
+  automatic WebSocket fallback, no retry. Use dbSDK's `db.batch` for
   atomic multi-statement writes, or a transaction transport on the adapter for
   dbSDK-level transactions.
 

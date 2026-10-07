@@ -4,22 +4,22 @@
 
 # dbSDK
 
-**Create, manage, and query databases with one SDK.**
+**Create, manage, and query databases with one TypeScript SDK.**
 
-Bring a provider credential, provision and manage resources, and run
-queries through one typed client. Launch providers: Supabase, Neon, and
-PlanetScale Postgres.
+Bring your provider credentials: one typed control plane to provision and
+manage resources, one typed client to run queries.
 
 </div>
 
 dbSDK has two halves that share one design language.
 
-**Management (the control plane).** Bring your own provider credential (a
-Supabase personal access token, a Neon API key, or a PlanetScale service
-token) and get one stable verb
-set over provider resources: `create`, `list`, `get`, `update`, `delete`,
-and `wait`. Provision a project, wait until it is ready, retrieve the
-connection details, and hand them to the query client. There is no central
+**Management (the control plane).** Bring your own provider credential and
+get one stable verb set over provider resources: `create`, `list`, `get`,
+`update`, `delete`, and `wait`. (Credentials shipping today: a Supabase
+personal access token, a Neon API key, or a PlanetScale service token —
+see [Current coverage](#current-coverage).) Provision a project, wait until
+it is ready, retrieve the connection details, and hand them to the query
+client. There is no central
 dbSDK backend, no credential proxying, and no automatic replay of
 create or delete.
 
@@ -45,13 +45,27 @@ not: no delete propagation, no CDC, no bidirectional sync.
 optional bridge hands Drizzle ORM's stable node-postgres / neon-http drivers
 a validated, dbSDK-owned connection: typed schema queries, joins, and
 relational queries run on the same pool dbSDK manages, with lifetime
-ownership, verified TLS, and the pooler guards preserved. `dbsdk/orm` is a
+ownership, verified TLS, and the pooler guards preserved. Typing is
+peer-free: the shared entry's declarations never name
+`@neondatabase/serverless`, explicit-schema calls
+(`drizzleNeonHttp<MySchema>(db)`) keep the full official `$client` surface
+via a structural mirror, and the `dbsdk/drizzle/neon-http` type entry (same
+runtime module) serves code that names the driver's nominal
+`NeonHttpDatabase`/`NeonQueryFunction` classes. `dbsdk/orm` is a
 pure re-export of the same stable drizzle-orm (0.45.x) root + pg-core
 authoring surface as a single import, so schemas authored through it are the
-same objects the bridge executes — PostgreSQL authoring only. Drizzle is
-never forked or wrapped; Native Drizzle errors surface as-is (no
-unified-error claim), and Studio, Kit, seed, and migrations are separate
-upstream tools — not claimed here.
+same objects the bridge executes — PostgreSQL authoring only. On the bridge's
+supported execution paths, failures surface as dbSDK's normalized `DbError`
+(`code`, `sqlstate`, `indeterminate` per the indeterminate-write policy) with
+the native driver error preserved on `cause` — Drizzle's raw query wrapper
+(which echoes SQL parameters) is unwrapped, and dbSDK never retries or replays
+a write. Three boundaries stay raw by design: the `$client` / `db.raw` escape
+hatches, Drizzle's deliberate-abort signal (`tx.rollback()`), and misuse that
+throws while *constructing* a query object (before Drizzle is called, e.g.
+`.values([])`). Drizzle is used unmodified from its published package — the
+bridge extends the stable drivers' own session seam, it does not fork them —
+and Studio, Kit, seed, and migrations are separate upstream tools, not
+claimed here.
 
 - **Parameterized by construction.** Interpolated values become positional
   bind parameters. They can never become identifiers or raw SQL fragments.
@@ -66,6 +80,27 @@ upstream tools — not claimed here.
 - **Secrets stay secrets.** Credentials are options you pass in; secrets
   the provider returns surface only in explicit `secrets` fields and are
   redacted from every raw payload and error message.
+
+## Current coverage
+
+dbSDK's design is provider-agnostic: the provider enters as a credential you
+own, and the adapter interface, capability model, and error contract do not
+change when a provider is added. The adapters and management integrations
+shipping today cover the PostgreSQL ecosystem:
+
+- **PostgreSQL** — any PostgreSQL endpoint you can reach (plain `postgres`
+  adapter).
+- **Supabase** — management via personal access token; direct / session /
+  transaction connection modes.
+- **Neon** — management via API key; HTTP, websocket, and
+  websocket-transaction query transports.
+- **PlanetScale Postgres** — management via service token; direct and pooled
+  connection modes.
+
+More major providers are planned. Provider-specific credentials, connection
+modes, transport limitations, and refusal behaviors are documented per
+adapter and kept precise — they are technical facts about how each provider
+works, not positioning.
 
 ## Status
 

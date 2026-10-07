@@ -21,6 +21,9 @@ dbSDK backend and no credential proxying.
 - `dbsdk/testing`: scripted query fixture.
 - `dbsdk/drizzle`: optional Drizzle ORM interop (`drizzlePostgres`,
   `drizzleNeonHttp`); lazy — needs the `drizzle-orm` peer only at factory call.
+  `dbsdk/drizzle/neon-http` is a type-only subpath over the same runtime
+  module for naming the driver's nominal `NeonHttpDatabase`/`NeonQueryFunction`
+  types; it requires the `@neondatabase/serverless` peer.
 - `dbsdk/orm`: optional Drizzle schema authoring surface (`pgTable`,
   columns, indexes, `relations`, operators, `sql`) — a single pure re-export
   of stable drizzle-orm root + pg-core; needs the `drizzle-orm` peer at
@@ -95,12 +98,20 @@ const drizzleDb = await drizzlePostgres(db, { schema }); // async: lazy-imports 
   same stable copy) or from `drizzle-orm`/`drizzle-orm/pg-core` directly;
   both resolve to the same objects, so schemas authored either way run
   through the bridge identically.
-- Honest boundaries: queries through the returned instance surface native
-  Drizzle/driver errors (not normalized `DbError`); `db.close()` ends the
-  pool and the previously returned instance then fails (no recreation);
-  Neon HTTP instances keep working after close (nothing to release). No
-  full-parity claim: Studio, Kit, seed, and migrations are separate
-  upstream tools, not implemented here.
+- Honest boundaries: query/transaction/batch failures through the returned
+  instance are normalized `DbError`s with the same `code`/`sqlstate`/
+  `retryable`/`indeterminate` semantics as `db.sql`, and the native driver
+  error stays on `cause` (Drizzle's `DrizzleQueryError` wrapper is unwrapped,
+  so parameter values never leak into messages). Raw exceptions remain on the
+  escape hatches (`drizzleDb.$client`, `db.raw`), for Drizzle's
+  deliberate-abort signal (`tx.rollback()` rejects with Drizzle's
+  `TransactionRollbackError`), and for misuse that throws while *constructing*
+  a query object before the Drizzle instance is called (e.g. `.values([])`
+  in a batch array) — that raises Drizzle's own error synchronously, outside
+  the bridge. `db.close()` ends the pool and the previously
+  returned instance then fails (no recreation); Neon HTTP instances keep
+  working after close (nothing to release). No full-parity claim: Studio,
+  Kit, seed, and migrations are separate upstream tools, not implemented here.
 
 ## Schema authoring (`dbsdk/orm`, optional)
 

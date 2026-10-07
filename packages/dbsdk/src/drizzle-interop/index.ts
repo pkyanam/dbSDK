@@ -25,16 +25,34 @@
  * 3. Lifetime stays with the caller's `db.close()`. Drizzle never ends the
  *    pool it is given. After `db.close()`, using the returned Drizzle instance
  *    fails (the pool was ended) and no pool is ever recreated.
- * 4. Error boundary is honest. Only pre-execution validation in this module
- *    uses dbSDK error conventions (`DbError`, code `CONFIGURATION`). Query,
+ * 4. Error boundary is normalized at every execution boundary. Only
+ *    pre-execution validation uses `DbError` code `CONFIGURATION`. Query,
  *    transaction and batch execution through the returned Drizzle instance
- *    surface native Drizzle / driver errors — they are NOT normalized into
- *    `DbError`, and dbSDK's indeterminate-write semantics do not extend to
- *    Drizzle's executor.
+ *    IS normalized into dbSDK's `DbError` — same classification
+ *    (`code`, `sqlstate`, `retryable`) and the same indeterminate-write policy
+ *    as `db.sql` / `db.query` / `db.transaction`, with the native driver error
+ *    preserved on `cause`. Drizzle's own `DrizzleQueryError` wrapper (whose
+ *    message echoes raw SQL parameters) is unwrapped at the bridge boundary;
+ *    no automatic retries or replay of writes are ever performed.
+ * 5. Raw escapes remain raw. `drizzleDb.$client` is the dbSDK-owned pool (TCP)
+ *    or neon query function (HTTP) — calls made directly through it (or
+ *    through `db.raw`) bypass this normalization layer, exactly like `db.raw`.
  *
  * Types are imported only here, in the optional entry. `dbsdk` root imports
  * never reference Drizzle, and importing this entry without calling a factory
  * has no side effects (no pool, no client, no network).
+ *
+ * Type boundary: this entry's declaration file never names the
+ * `@neondatabase/serverless` peer, so a consumer running only the PostgreSQL
+ * bridge (pg + drizzle-orm installed) typechecks it cleanly even with
+ * `skipLibCheck: false`. The Neon-specific parts of the surface are described by the
+ * dbSDK-owned structural contracts below — including a peer-free,
+ * member-for-member mirror of the official `neon()` client
+ * (`NeonHttpNativeClientContract`) that keeps explicit-schema calls
+ * (`drizzleNeonHttp<MySchema>(db, …)`) on the full official `$client` surface.
+ * The driver-typed declaration of `drizzleNeonHttp` (for consumers who name
+ * `NeonHttpDatabase` / `NeonQueryFunction` directly) is the separate
+ * `dbsdk/drizzle/neon-http` type entry over the same runtime module.
  */
 
 import { DbError } from '../errors.js';
@@ -42,14 +60,24 @@ import type { Database } from '../types.js';
 import type { PgPoolLike } from '../adapters/pg-engine.js';
 import type { SupabaseRaw } from '../adapters/supabase.js';
 import type { NeonRaw } from '../adapters/neon.js';
+import { loadNeonHttpBridge, loadPgBridge, type NeonHttpBridge, type PgBridge } from './sessions.js';
+import type { NeonHttpClient } from 'drizzle-orm/neon-http';
 
 /** Drizzle's node-postgres client type (from the stable driver's own contract). */
 import type { Pool } from 'pg';
 /** Root re-exports `DrizzleConfig` in stable 0.45.x (src/index.ts re-exports ./utils). */
 import type { DrizzleConfig } from 'drizzle-orm';
+import type { BatchItem, BatchResponse } from 'drizzle-orm/batch';
 import type { NodePgDatabase } from 'drizzle-orm/node-postgres';
-import type { NeonHttpDatabase } from 'drizzle-orm/neon-http';
-import type { NeonQueryFunction } from '@neondatabase/serverless';
+import type { PgDatabase, PgQueryResultHKT } from 'drizzle-orm/pg-core';
+
+/*
+ * Implementation-internal driver types. These appear ONLY inside function
+ * bodies and non-exported asserts predicates below — never in an exported
+ * signature — so the emitted `index.d.ts` stays free of
+ * `@neondatabase/serverless` and pg-only consumers can typecheck this entry.
+ * `scripts/drizzle-peer-types-fence.mjs` guards that invariant on every build.
+ */
 
 /** Version constraint this bridge is written and verified against (stable line, not 1.0 RC). */
 const DRIZZLE_PEER_RANGE = '^0.45.3';
@@ -65,6 +93,331 @@ export type DrizzleInteropConfig<TSchema extends Record<string, unknown> = Recor
 
 /** Raw handles accepted by {@link drizzlePostgres}: a bare pg pool or the Supabase wrapper. */
 export type PgBridgeRaw = PgPoolLike | SupabaseRaw;
+
+/*
+ * ─────────────────────────────────────────────────────────────────────────────
+ * Peer-free Neon HTTP driver contracts.
+ *
+ * TypeScript resolves every type named in a declaration file eagerly, so the
+ * shared `dbsdk/drizzle` entry may not reference `@neondatabase/serverless` —
+ * not even in the signature of {@link drizzleNeonHttp}, which a PostgreSQL-only
+ * consumer never calls (a single peer-typed name here makes `tsc
+ * --skipLibCheck:false` fail for every pg-only consumer of this entry, and drags
+ * `drizzle-orm/neon-http`'s own peer-typed declarations into their build too).
+ *
+ * These mirrors describe, with dbSDK-owned types, exactly the parts of the Neon
+ * HTTP driver surface the bridge and its consumers use. They are structural
+ * contracts, not weaker replacements:
+ *
+ * - A database built by `dbsdk/neon` satisfies `NeonRawContract`, and
+ *   {@link drizzleNeonHttp} still infers the driver's own
+ *   `NeonQueryFunction<false, true>` for `$client` on such databases.
+ * - Result shapes are exact mirrors of the driver's, so select / insert /
+ *   update / delete / execute / RQB types are identical to the driver-typed
+ *   path (proven in tests/types/drizzle-neon-contract.test-d.ts).
+ * - The database contract cannot be a structural stand-in for the driver's
+ *   `NeonHttpDatabase` in the reverse direction (it is a class with protected
+ *   members, so nothing can be assigned *to* it). Code that must name the
+ *   driver's exact types — or call `db.raw.sql.transaction` on a contract-typed
+ *   client — imports `dbsdk/drizzle/neon-http`, the driver-typed declaration of
+ *   the same runtime function, which therefore requires the Neon peer.
+ * ─────────────────────────────────────────────────────────────────────────────
+ */
+
+/** Result row metadata, mirroring the driver's `FieldDef`. */
+interface NeonFieldDefContract {
+  name: string;
+  tableID: number;
+  columnID: number;
+  dataTypeID: number;
+  dataTypeSize: number;
+  dataTypeModifier: number;
+  format: string;
+}
+
+/** Rows as the driver returns them, mirroring the driver's `QueryRows`. */
+type NeonQueryRowsContract<ArrayMode extends boolean> = ArrayMode extends true
+  ? unknown[][]
+  : Record<string, unknown>[];
+
+/** Full result envelope, mirroring the driver's `FullQueryResults`. */
+interface NeonFullQueryResultsContract<ArrayMode extends boolean> {
+  fields: NeonFieldDefContract[];
+  command: string;
+  rowCount: number;
+  rows: NeonQueryRowsContract<ArrayMode>;
+  rowAsArray: ArrayMode;
+}
+
+/**
+ * Query result as Drizzle's neon-http driver maps it — an exact structural
+ * mirror of `NeonHttpQueryResult<T>` from `drizzle-orm/neon-http`, rebuilt
+ * without the driver's types.
+ */
+export type NeonHttpQueryResultContract<T> = Omit<NeonFullQueryResultsContract<false>, 'rows'> & {
+  rows: T[];
+};
+
+/**
+ * The Neon HTTP query function as the bridge and its consumers use it: callable
+ * with template literals and with `query(text, params)`. This is the shape
+ * `Database<NeonRaw>['raw']['sql']` exposes; when the database was built by
+ * `dbsdk/neon` (driver installed), {@link drizzleNeonHttp} infers `$client` as
+ * the driver's own `NeonQueryFunction<false, true>` instead of this contract.
+ * This permissive contract is also what the second overload of
+ * {@link drizzleNeonHttp} uses as its default, so calls with a custom,
+ * narrower `sql` are never claimed to have the official client's full surface.
+ */
+export interface NeonHttpClientContract {
+  (strings: TemplateStringsArray, ...params: any[]): Promise<NeonHttpQueryResultContract<Record<string, unknown>>>;
+  query(text: string, params?: any[]): Promise<NeonHttpQueryResultContract<Record<string, unknown>>>;
+}
+
+/**
+ * Mirrors the Neon adapter's `NeonTransactionTransport` union (kept in sync by
+ * tests/types/drizzle-neon-contract.test-d.ts).
+ */
+export type NeonTransactionTransportContract = 'none' | 'postgres' | 'websocket';
+
+/**
+ * Structural contract for the Neon adapter's raw handle — mirrors `NeonRaw`
+ * from `dbsdk/neon` without referencing the driver. Databases built by
+ * `dbsdk/neon` satisfy it; the transport gates are unchanged and still checked
+ * at runtime (HTTP only for this factory).
+ */
+export type NeonRawContract =
+  | {
+      transport: 'http';
+      transactionTransport: NeonTransactionTransportContract;
+      sql: NeonHttpClientContract;
+    }
+  | {
+      transport: 'websocket';
+      pool: PgPoolLike;
+    };
+
+/** Drizzle's result-kind mapping for the neon-http driver, rebuilt peer-free. */
+export interface NeonHttpQueryResultHKTContract extends PgQueryResultHKT {
+  type: NeonHttpQueryResultContract<this['row']>;
+}
+
+/** The members the neon-http driver adds on top of `PgDatabase` (mirrors `NeonHttpDatabase.batch` and `$withAuth`). */
+export interface NeonHttpDatabaseExtras {
+  batch<U extends BatchItem<'pg'>, T extends Readonly<[U, ...U[]]>>(batch: T): Promise<BatchResponse<T>>;
+  /** Log in with an auth token for subsequent queries (mirrors `NeonHttpDatabase.$withAuth`). */
+  $withAuth(token: string | (() => Promise<string> | string)): Omit<this, Exclude<keyof this, '$count' | 'delete' | 'select' | 'selectDistinct' | 'selectDistinctOn' | 'update' | 'insert' | 'with' | 'query' | 'execute' | 'refreshMaterializedView'>>;
+}
+
+/**
+ * The database {@link drizzleNeonHttp} returns, described without the driver's
+ * types. Every query surface behaves identically to Drizzle's
+ * `NeonHttpDatabase<TSchema>` (proven identical in the type tests); what is
+ * absent is the driver-nominal framing (the `NeonHttpDatabase` class itself and
+ * the internal `_` session accessor). `$client` is generic so callers whose raw
+ * handle is strongly typed get the driver's own client type via
+ * {@link NeonHttpClientOf}.
+ */
+export type NeonHttpDatabaseContract<
+  TSchema extends Record<string, unknown> = Record<string, never>,
+  TClient extends NeonHttpClientContract = NeonHttpClientContract,
+> = Omit<PgDatabase<NeonHttpQueryResultHKTContract, TSchema>, '_'> &
+  NeonHttpDatabaseExtras & {
+    $client: TClient;
+  };
+
+/**
+ * The query-function type a given raw handle exposes — for a database built by
+ * `dbsdk/neon` this is the driver's own `NeonQueryFunction<false, true>`.
+ */
+export type NeonHttpClientOf<TRaw extends NeonRawContract> = TRaw extends {
+  transport: 'http';
+  sql: infer S;
+}
+  ? S
+  : never;
+
+/*
+ * ─────────────────────────────────────────────────────────────────────────────
+ * Native-shaped Neon client contract (the explicit-schema-call default).
+ *
+ * Why a second default exists: when a caller supplies an explicit schema type
+ * argument (`drizzleNeonHttp<MySchema>(db, …)`), TypeScript does not infer a
+ * defaulted type parameter from the arguments — it uses the default (verified
+ * against TS 5.9.3; a non-defaulted trailing type parameter is not allowed
+ * after a defaulted one either — TS2706 — and dropping the default makes every
+ * such call a hard TS2558 "Expected 2 type arguments"). The R1 design's
+ * default (`NeonRawContract`) therefore silently downgraded `$client` to the
+ * permissive contract for exactly that pre-existing call form.
+ *
+ * The default is now `NeonHttpNativeRawContract` below: a peer-free,
+ * member-for-member mirror of the official `neon()` query function as the
+ * `dbsdk/neon` adapter creates it (`fullResults: true`, `arrayMode` off), so
+ * the explicit-schema form keeps the full official `$client` surface
+ * (`.query()` with options and array/full-result modes, `.unsafe()`,
+ * `.transaction()`, inspectable query-promise metadata). A second overload of
+ * {@link drizzleNeonHttp} keeps the R1 default (`NeonRawContract`) for raw
+ * handles that are not assignable to the native shape, so custom, narrower
+ * `sql` types are never claimed to have the official client's full surface.
+ *
+ * Provenance: the mirrors below are re-derived structural descriptions of
+ * `@neondatabase/serverless` 1.2.0 declarations (MIT — see
+ * THIRD_PARTY_NOTICES.md), not imports and not copies of source code; the
+ * file never names the peer. Honesty is enforced bidirectionally in
+ * tests/types/drizzle-neon-contract.test-d.ts:
+ * `NeonQueryFunction<false, true>` and `NeonHttpNativeClientContract` must
+ * remain assignable in BOTH directions. They are deliberately NOT claimed to
+ * be alias-identical to the peer's types — structural equivalence is what
+ * every call, member access and assignment needs, and it keeps the shared
+ * declaration peer-free.
+ * ─────────────────────────────────────────────────────────────────────────────
+ */
+
+/** Connection-style parameters, mirroring the peer's (private) `ConnectionParams`. */
+type NeonConnectionParamsContract = {
+  [K in 'connectionString' | 'user' | 'username' | 'password' | 'host' | 'hostname' | 'port' | 'database']?: K extends 'port'
+    ? string | number | (() => string | number | Promise<string | number>)
+    : string | (() => string | Promise<string>);
+};
+
+/** Custom type parsers, mirroring the peer's `CustomTypesConfig`. */
+interface NeonCustomTypesContract {
+  getTypeParser: (id: number, format?: 'text' | 'binary') => any;
+}
+
+/**
+ * Per-query options, mirroring the peer's `HTTPQueryOptions<ArrayMode,
+ * FullResults>`; `arrayMode`/`fullResults` are typed by the surrounding
+ * generics exactly as in the peer.
+ */
+interface NeonHttpQueryOptionsContract<ArrayMode extends boolean, FullResults extends boolean>
+  extends NeonConnectionParamsContract {
+  arrayMode?: ArrayMode;
+  fullResults?: FullResults;
+  fetchOptions?: Record<string, any>;
+  authToken?: string | (() => Promise<string> | string);
+  types?: NeonCustomTypesContract;
+  disableWarningInBrowsers?: boolean;
+}
+
+/**
+ * Transaction-level options, mirroring the peer's
+ * `HTTPTransactionOptions<ArrayMode, FullResults>`.
+ */
+interface NeonHttpTransactionOptionsContract<ArrayMode extends boolean, FullResults extends boolean>
+  extends NeonHttpQueryOptionsContract<ArrayMode, FullResults> {
+  isolationLevel?: 'ReadUncommitted' | 'ReadCommitted' | 'RepeatableRead' | 'Serializable';
+  readOnly?: boolean;
+  deferrable?: boolean;
+}
+
+/** Tagged-template payload, mirroring the peer's `SqlTemplate` class instance. */
+interface NeonSqlTemplateContract {
+  strings: ReadonlyArray<string>;
+  values: any[];
+  toParameterizedQuery(result?: { query: string; params: any[] }): { query: string; params: any[] };
+}
+
+/** A prepared statement, mirroring the peer's `ParameterizedQuery`. */
+interface NeonParameterizedQueryContract {
+  query: string;
+  params: any[];
+}
+
+/** Raw SQL fragment marker, mirroring the peer's `UnsafeRawSql` class instance. */
+interface NeonUnsafeRawSqlContract {
+  sql: string;
+}
+
+/**
+ * The awaited-yet-inspectable query promise, mirroring the peer's
+ * `NeonQueryPromise<ArrayMode, FullResults, T>` — an interface extending
+ * `Promise<T>` merged with the class's instance members (`execute`,
+ * `queryData`, `opts`). This is what a call or `.query()` returns BEFORE
+ * awaiting, so callers can inspect the payload/metadata without any runtime
+ * change (it is the same object the driver produced).
+ */
+export interface NeonHttpQueryPromiseContract<ArrayMode extends boolean, FullResults extends boolean, T = any>
+  extends Promise<T> {
+  execute: (
+    queryData: NeonSqlTemplateContract | NeonParameterizedQueryContract | (NeonSqlTemplateContract | NeonParameterizedQueryContract)[],
+    opts?: NeonHttpQueryOptionsContract<ArrayMode, FullResults> | NeonHttpQueryOptionsContract<ArrayMode, FullResults>[],
+  ) => Promise<T>;
+  queryData: NeonSqlTemplateContract | NeonParameterizedQueryContract;
+  opts?: NeonHttpQueryOptionsContract<ArrayMode, FullResults> | undefined;
+}
+
+/** Mirrors the peer's `NeonQueryInTransaction`. */
+interface NeonHttpQueryInTransactionContract {
+  queryData: NeonSqlTemplateContract | NeonParameterizedQueryContract;
+}
+
+/** The per-transaction query function, mirroring the peer's `NeonQueryFunctionInTransaction`. */
+interface NeonHttpInTransactionClientContract<ArrayMode extends boolean, FullResults extends boolean> {
+  (strings: TemplateStringsArray, ...params: any[]): NeonHttpQueryPromiseContract<
+    ArrayMode,
+    FullResults,
+    FullResults extends true ? NeonFullQueryResultsContract<ArrayMode> : NeonQueryRowsContract<ArrayMode>
+  >;
+  query(queryWithPlaceholders: string, params?: any[]): NeonHttpQueryPromiseContract<
+    ArrayMode,
+    FullResults,
+    FullResults extends true ? NeonFullQueryResultsContract<ArrayMode> : NeonQueryRowsContract<ArrayMode>
+  >;
+  unsafe(rawSQL: string): NeonUnsafeRawSqlContract;
+}
+
+/**
+ * The official `neon()` query function as the `dbsdk/neon` adapter creates it
+ * (`fullResults: true`), described without importing
+ * `@neondatabase/serverless`. Member-for-member mirror of the peer's
+ * `NeonQueryFunction<false, true>`: bidirectionally assignable to it (tested),
+ * so `$client` from an explicit-schema call produces and accepts exactly what
+ * the pre-contract signature exposed. `.transaction()` is typed as the peer
+ * types it, and the peer's own runtime implements it (an HTTP round-trip,
+ * non-interactive atomic batch). What throws at runtime is Drizzle's
+ * ORM-level interactive `db.transaction(...)` on the returned instance —
+ * documented below; the mirror describes the client exactly as the peer does.
+ */
+export interface NeonHttpNativeClientContract {
+  (strings: TemplateStringsArray, ...params: any[]): NeonHttpQueryPromiseContract<false, true, NeonFullQueryResultsContract<false>>;
+  query<ArrayModeOverride extends boolean = false, FullResultsOverride extends boolean = true>(
+    queryWithPlaceholders: string,
+    params?: any[],
+    queryOpts?: NeonHttpQueryOptionsContract<ArrayModeOverride, FullResultsOverride>,
+  ): NeonHttpQueryPromiseContract<
+    ArrayModeOverride,
+    FullResultsOverride,
+    FullResultsOverride extends true ? NeonFullQueryResultsContract<ArrayModeOverride> : NeonQueryRowsContract<ArrayModeOverride>
+  >;
+  unsafe(rawSQL: string): NeonUnsafeRawSqlContract;
+  transaction: <ArrayModeOverride extends boolean = false, FullResultsOverride extends boolean = true>(
+    queriesOrFn:
+      | NeonHttpQueryPromiseContract<false, true>[]
+      | ((sql: NeonHttpInTransactionClientContract<ArrayModeOverride, FullResultsOverride>) => NeonHttpQueryInTransactionContract[]),
+    opts?: NeonHttpTransactionOptionsContract<ArrayModeOverride, FullResultsOverride>,
+  ) => Promise<FullResultsOverride extends true ? NeonFullQueryResultsContract<ArrayModeOverride>[] : NeonQueryRowsContract<ArrayModeOverride>[]>;
+}
+
+/**
+ * The raw handle the `dbsdk/neon` adapter creates for the HTTP transport,
+ * described without importing the peer — the default of {@link drizzleNeonHttp}'s
+ * second type parameter (first overload), so an explicit-schema call keeps the
+ * official client's full surface on `$client`. A database built by `dbsdk/neon`
+ * satisfies it; a custom raw handle with a narrower `sql` does not, and for
+ * those the second overload (default {@link NeonRawContract}) applies — pass
+ * the raw type as the second type argument or omit the schema argument to stay
+ * on the permissive contract typing.
+ */
+export type NeonHttpNativeRawContract =
+  | {
+      transport: 'http';
+      transactionTransport: NeonTransactionTransportContract;
+      sql: NeonHttpNativeClientContract;
+    }
+  | {
+      transport: 'websocket';
+      pool: PgPoolLike;
+    };
 
 function configurationError(message: string, cause?: unknown): DbError {
   return new DbError(message, {
@@ -242,9 +595,9 @@ export async function drizzlePostgres<
   assertNoNativeConstructionConfig(config);
   const pool = resolvePgPool(db.raw);
 
-  let drizzle: typeof import('drizzle-orm/node-postgres')['drizzle'];
+  let bridge: PgBridge;
   try {
-    ({ drizzle } = await import('drizzle-orm/node-postgres'));
+    bridge = await loadPgBridge();
   } catch (cause) {
     throw missingPeerError(cause);
   }
@@ -254,10 +607,7 @@ export async function drizzlePostgres<
   // path exists here that could make Drizzle build its own pool: the DSN /
   // `connection` / `client` inputs are rejected above, at compile time and at
   // runtime, before this call.
-  return drizzle<TSchema, Pool>(
-    pool as unknown as Pool,
-    rebuildDrizzleConfig(config),
-  ) as NodePgDatabase<TSchema> & { $client: Pool };
+  return bridge.buildNodePgDatabase(pool as unknown as Pool, rebuildDrizzleConfig(config), db.adapterId);
 }
 
 /**
@@ -296,6 +646,34 @@ function rebuildDrizzleConfig<TSchema extends Record<string, unknown>>(
  * (dbSDK creates it with `fullResults: true`; the driver re-specifies both
  * per call, so no wrapper or re-derivation happens here).
  *
+ * Types: this signature is peer-free — it is written against the dbSDK-owned
+ * structural contracts above so that PostgreSQL-only consumers (pg +
+ * drizzle-orm installed, no `@neondatabase/serverless`) can typecheck this
+ * entry. It is not a weaker surface, and the explicit-schema call form is
+ * preserved (R4):
+ *
+ * - Inferred generics, `drizzleNeonHttp(db, { schema })`: for a database built
+ *   by `dbsdk/neon` the returned `$client` is exactly the driver's own
+ *   `NeonQueryFunction<false, true>`.
+ * - Explicit schema argument, `drizzleNeonHttp<MySchema>(db, …)`: TypeScript
+ *   uses a defaulted type parameter's default instead of inferring it, so the
+ *   default is `NeonHttpNativeRawContract` — a peer-free, member-for-member
+ *   mirror of the official client — and `$client` keeps the full official
+ *   surface (`.query()` with per-call options and array/full-result modes,
+ *   `.unsafe()`, `.transaction()`, inspectable query-promise metadata) and is
+ *   bidirectionally assignable to `NeonQueryFunction<false, true>`.
+ * - Custom raw handles with a narrower `sql`: pass the raw type as the second
+ *   type argument (`drizzleNeonHttp<MySchema, MyRaw>(db, …)`) or omit the
+ *   schema argument. The second overload (default `NeonRawContract`) keeps
+ *   those calls on the permissive {@link NeonHttpClientContract} — a custom
+ *   `sql` is never claimed to have the official client's full surface.
+ * - To name the driver's exact `NeonHttpDatabase` / `NeonQueryFunction`
+ *   classes, import the same function from `dbsdk/drizzle/neon-http` (requires
+ *   the Neon peer, like the driver itself).
+ *
+ * Every query result type is identical to the driver-typed path
+ * (tests/types/drizzle-neon-contract.test-d.ts).
+ *
  * Honest limits (the driver's, unchanged): `drizzleDb.transaction(...)`
  * throws "No transactions support in neon-http driver" — use dbSDK's
  * `db.batch` for atomic multi-statement writes, or configure a transaction
@@ -305,12 +683,27 @@ function rebuildDrizzleConfig<TSchema extends Record<string, unknown>>(
  * previously returned Drizzle instance keeps working after close (it holds no
  * connection) — lifetime matters for the TCP bridge above.
  */
-export async function drizzleNeonHttp<
+export function drizzleNeonHttp<
   TSchema extends Record<string, unknown> = Record<string, never>,
+  TRaw extends NeonRawContract = NeonHttpNativeRawContract,
 >(
-  db: Database<NeonRaw>,
+  db: Database<TRaw>,
   config?: DrizzleInteropConfig<TSchema>,
-): Promise<NeonHttpDatabase<TSchema> & { $client: NeonQueryFunction<false, true> }> {
+): Promise<NeonHttpDatabaseContract<TSchema, NeonHttpClientOf<TRaw>>>;
+export function drizzleNeonHttp<
+  TSchema extends Record<string, unknown> = Record<string, never>,
+  TRaw extends NeonRawContract = NeonRawContract,
+>(
+  db: Database<TRaw>,
+  config?: DrizzleInteropConfig<TSchema>,
+): Promise<NeonHttpDatabaseContract<TSchema, NeonHttpClientOf<TRaw>>>;
+export async function drizzleNeonHttp<
+  TSchema extends Record<string, unknown>,
+  TRaw extends NeonRawContract,
+>(
+  db: Database<TRaw>,
+  config?: DrizzleInteropConfig<TSchema>,
+): Promise<NeonHttpDatabaseContract<TSchema, NeonHttpClientOf<TRaw>>> {
   assertDatabaseClient(db);
   const { capabilities } = db;
   if (capabilities.transport !== 'http') {
@@ -345,22 +738,29 @@ export async function drizzleNeonHttp<
     );
   }
 
-  let drizzle: typeof import('drizzle-orm/neon-http')['drizzle'];
+  let bridge: NeonHttpBridge;
   try {
-    ({ drizzle } = await import('drizzle-orm/neon-http'));
+    bridge = await loadNeonHttpBridge();
   } catch (cause) {
     throw missingPeerError(cause);
   }
   // Pass the actual raw.sql handle straight through (no wrapper, no
   // re-derivation): the stable driver passes { arrayMode, fullResults: true }
   // per call, so dbSDK's fullResults:true instance behaves identically. The
-  // cast is type bookkeeping against the driver's generic client parameter —
-  // the runtime object is the dbSDK-owned neon function, not a construction
-  // input (DSN/connection/client paths are rejected above).
-  return drizzle<TSchema, NeonQueryFunction<false, true>>(
-    sql as unknown as NeonQueryFunction<false, true>,
+  // runtime object is the dbSDK-owned neon function, not a construction input
+  // (DSN/connection/client paths are rejected above).
+  //
+  // The `as unknown as` below only re-frames the SAME runtime object the driver
+  // returned into the peer-free contract this entry exports: the instance
+  // satisfies `NeonHttpDatabaseContract` (proven in
+  // tests/types/drizzle-neon-contract.test-d.ts), and for callers whose raw handle
+  // is strongly typed `$client` is exactly the driver's own
+  // `NeonQueryFunction<false, true>` via `NeonHttpClientOf<TRaw>`. The
+  // per-caller refinement cannot be re-verified at this cast site because the
+  // caller's raw type is abstracted behind the generic `TRaw`.
+  return bridge.buildNeonHttpDatabase(
+    sql as unknown as NeonHttpClient,
     rebuildDrizzleConfig(config),
-  ) as NeonHttpDatabase<TSchema> & {
-    $client: NeonQueryFunction<false, true>;
-  };
+    db.adapterId,
+  ) as unknown as NeonHttpDatabaseContract<TSchema, NeonHttpClientOf<TRaw>>;
 }

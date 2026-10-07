@@ -6,7 +6,7 @@ import { defineConfig } from "blume";
 export default defineConfig({
   title: "dbSDK",
   description:
-    "Create, manage, and query databases with one SDK. Bring your provider credentials: the management layer provisions and manages Supabase and Neon resources, and the typed PostgreSQL client handles queries, transactions, and errors.",
+    "Create, manage, and query databases with one TypeScript SDK. Bring your provider credentials.",
   logo: {
     // v3 circular "db" ligature emblem (ImageGen master, alpha preserved,
     // original ~14-16% padding). Inverted to white in dark mode via theme.css

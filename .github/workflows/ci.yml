@@ -24,6 +24,8 @@ jobs:
         run: pnpm --filter dbsdk test
       - name: Build (ESM + declarations)
         run: pnpm --filter dbsdk build
+      - name: Drizzle peer-types fence
+        run: node packages/dbsdk/scripts/drizzle-peer-types-fence.mjs
       - name: Pack check
         run: pnpm --filter dbsdk pack:check
 
